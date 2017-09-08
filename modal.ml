@@ -31,7 +31,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   (** type of time, that can index mus and nus *)
   type time =
     | Inf              (** inifinite ordinal *)
-    | Var of (modal * int)
+    | Pre of time * int
 
   (** Formula of the modal mu calculus + Next from LTL,
       Next means and transition, inclusing invisible ones *)
@@ -62,36 +62,36 @@ module Make(Act:Act)(Prop:Prop) = struct
     | IVar of int * int
 
   (* Time printing *)
-  let tprint ff = function
+  let rec tprint ff = function
     | Inf -> ()
-    | Var(t,f) -> Format.fprintf ff "?"  (* FIXME *)
-
-  let pred m = function
-    | Inf      -> Var(m,0)
-    | Var(a,p) -> Var(a,p+1)
-
-  let pred' m = function
-    | Inf      -> Inf
-    | Var(a,p) -> Var(a,p+1)
-
-  (** vvar as a function, for Bindlib *)
-  let vvar x = VVar x
+    | Pre(Inf,k) -> Format.printf "t%d" k
+    | Pre(t,_) -> Format.printf "-%a" tprint t
 
   (** total order on time *)
   let rec compare_time t1 t2 =
     match (t1,t2) with
-    | Var _, Inf -> -1
-    | Inf, Var _ -> 1
+    | Pre _, Inf -> -1
+    | Inf, Pre _ -> 1
     | Inf, Inf -> 0
-    | Var(m1,f1), Var(m2,f2) ->
-       match ileq m1 m2 with
-       | 0 -> f1 - f2
-       | c -> c
+    | Pre(_,f1), Pre(_,f2) -> compare f1 f2
+
+  let pred =
+    let c = ref 0 in
+    fun t ->
+      let k = !c in c := 1 + !c;
+      Pre(t,k)
+
+  let pred' posi t =
+    if t = Inf then t else
+      List.find (function Pre(t',_) -> compare_time t t' = 0 | _ -> false) posi
+
+  (** vvar as a function, for Bindlib *)
+  let vvar x = VVar x
 
   (** A total order on formulas, This order indirectly select the next
       litteral in the solver procedure, so changing it is not at all
       neutral *)
-  and ileq m1 m2 =
+  let rec ileq m1 m2 =
     if m1 == m2 then 0 else
       match m1, m2 with
       | Atom(a1), Atom(a2) -> Prop.compare a1 a2
@@ -168,12 +168,13 @@ module Make(Act:Act)(Prop:Prop) = struct
   let cmp_time t1 t2 =
     let open Sct in
     let rec cmp_time t1 t2 =
-        if t1 == t2 then Zero else
         match (t1, t2) with
-        | (Inf       , Inf       )                         -> assert false
-        | (_         , Inf       )                         -> Min1
-        | (Var(x1,p1), Var(x2,p2)) when ileq x1 x2 = 0 && p1 > p2 -> Min1
-        | (_         , _         )                         -> Infi
+        | (Inf      , Inf      )              -> Infi
+        | (_        , Inf      )              -> Min1
+        | (Inf      , _        )              -> Infi
+        | (Pre(_,k1), Pre(_,k2)) when k1 = k2 -> Zero
+        | (Pre(t,_) , _        )              ->
+           if cmp_time t t2 <= Zero then Min1 else Infi
     in
     let res = cmp_time t1 t2 in
     Io.log_cmp "cmp_time %a %a = %a\n" tprint t1 tprint t2 cprint res;
@@ -385,7 +386,7 @@ module Make(Act:Act)(Prop:Prop) = struct
      ; disj : modal list
      ; blnu : modal list  (** these are nu decorate with time which are
                               not known to be positive and can not be unfolded *)
-     ; posi : time list   (** the positive time *)
+     ; posi : time list   (** the defined time *)
      }
 
   (** Printing for sequent *)
@@ -765,21 +766,24 @@ module Make(Act:Act)(Prop:Prop) = struct
        | Disj l ->
           add_to_seq { s with disj = m::s.disj } ms
        | Mu(t,i,f) ->
-          let s = { s with posi = t::s.posi } in
-          let (ubnu,blnu) =
+          let t' = pred t in
+          let s = { s with posi = t'::s.posi } in
+          let (ubnu,blnu) = (* FIXME *)
             List.partition (function Nu(t',_,_) -> compare_time t t' = 0 | _ -> false) s.blnu
           in
           let s = { s with blnu } in
-          let v = Array.init (mbinder_arity f) (fun i -> Mu(pred m t,i,f)) in
+          let v = Array.init (mbinder_arity f) (fun i -> Mu(pred t,i,f)) in
           let m = (msubst f v).(i) in
           add_to_seq s (m::ubnu@ms)
-       | Nu(t,i,f) when t == Inf
-                     || List.exists (fun t0 -> compare_time t0 t = 0) s.posi ->
-          let v = Array.init (mbinder_arity f) (fun i -> Nu(pred' m t,i,f)) in
-          let m = (msubst f v).(i) in
-          add_to_seq s (m::ms)
        | Nu(t,i,f) ->
-          add_to_seq { s with blnu = m :: s.blnu } ms
+          begin
+            try
+              let v = Array.init (mbinder_arity f) (fun i -> Nu(pred' s.posi t,i,f)) in
+              let m = (msubst f v).(i) in
+              add_to_seq s (m::ms)
+            with Not_found ->
+                 add_to_seq { s with blnu = m :: s.blnu } ms
+          end
        | MAll(a,m) -> add_to_seq { s with mAll = (a,m)::s.mAll } ms
        | MExi(a,m) -> add_to_seq { s with mExi = (a,m)::s.mExi } ms
        | CAll(m) -> add_to_seq { s with cAll = m::s.cAll } ms
