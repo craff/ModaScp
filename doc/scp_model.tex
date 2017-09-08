@@ -1,0 +1,146 @@
+\documentclass[a4]{article}
+\usepackage{amssymb,amsmath,amsthm} %must be before unicode-math
+\usepackage[mathletters]{ucs}
+\usepackage[utf8x]{inputenc}
+\usepackage{bussproofs}
+\usepackage{stmaryrd}
+\usepackage{wasysym}
+
+\newcommand{\prop}{\ensuremath{\mathcal{P}}}
+\newcommand{\acts}{\ensuremath{\mathcal{A}}}
+\newcommand{\forms}{\ensuremath{\mathcal{F}}}
+\newcommand{\sem}[1]{\ensuremath{\llbracket #1 \rrbracket}}
+\newcommand{\st}{\mid}
+\newcommand{\seq}[2]{\ensuremath{#1 \mid #2 \vdash}}
+\newcommand{\pos}[2]{\ensuremath{#1 \vdash #2 > 0}}
+
+\newtheorem{defi}{Definition}
+
+\title{Model Checking and Satisfiability\\Using the Size Change Principle}
+%\author{...}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Formulas}
+
+We are given a set of propositions $\prop = \{P,Q,R\dots\}$, which may
+depend on propositional variables of the set $\{X,Y,Z\dots\}$. We require
+$\prop$ to be closed under the propositional negation operator. In other
+words, if $P ∈ \prop$ then we should have a proposition $¬P ∈ \prop$. We
+are also given a set of actions $\acts = \{a,b,c\dots\}$, and a set of
+time variables $\{α, β, δ\dots\}$. The former will be used to label the
+transitions in a form of automaton, and the latter will be used to express
+a notion of time (or size) related to fixpoints.
+\begin{defi}
+  The set of formulas $\forms$ is defined by the following BNF grammar.
+  \begin{align*}
+    κ,τ &::= ∞ ∣ α-n \hspace{8.0cm} n∈\mathbb{N} \cr
+    F,G &::= P ∣ F ∧ G ∣ F ∨ G ∣ μ_κ X.F ∣ ν_κ X.F ∣ [a] F ∣ ⟨a⟩ F
+           ∣ □ F ∣ \lozenge F ∣ \ocircle F
+  \end{align*}
+      This BNF uses a set of indexes $κ$ to annotate fixpoint.
+      Usual fixpoint are encoded as $μ_∞ X.F$ and $ν_∞ X.F$ and are
+      written simply $μ X.F$ and $ν X.F$.
+\end{defi}
+
+\begin{figure}
+  \centering
+
+  % Arrow introduction
+  \begin{prooftree}
+    \AxiomC{}
+    \RightLabel{$⊥$}
+    \UnaryInfC{$\seq{γ}{P, ¬P, Γ}$}
+    \DisplayProof\hfill
+    \AxiomC{$\seq{γ}{G, F, Γ}$}
+    \RightLabel{$∧$}
+    \UnaryInfC{$\seq{γ}{G∧F, Γ}$}
+    \DisplayProof\hfill
+    \AxiomC{$\seq{γ}{G, Γ}$}
+    \AxiomC{$\seq{γ}{¬G, F, Γ}$}
+    \RightLabel{$∨$}
+    \BinaryInfC{$\seq{γ}{G∨F, Γ}$}
+  \end{prooftree}
+
+  \begin{prooftree}
+    \AxiomC{$\seq{γ}{F[X := μ_∞ X.F], Γ}$}
+    \RightLabel{$μ_∞$}
+    \UnaryInfC{$\seq{γ}{μ_∞ X.F, Γ}$}
+    \DisplayProof\hfill
+    \AxiomC{$\seq{γ,α-n}{F[X := μ_{α-(n+1)} X.F], Γ}$}
+    \RightLabel{$μ$}
+    \UnaryInfC{$\seq{γ}{μ_{α-n} X.F, Γ}$}
+  \end{prooftree}
+
+  \begin{prooftree}
+    \AxiomC{$\seq{γ}{F[X := ν_{α-(n+1)} X.F], Γ}$}
+    \AxiomC{$\pos{γ}{α-n}$}
+    \RightLabel{$ν$}
+    \BinaryInfC{$\seq{γ}{ν_{α-n} X.F, Γ}$}
+  \end{prooftree}
+
+  \begin{prooftree}
+    \AxiomC{$\seq{γ}{F[X := ν_∞ X.F], Γ}$}
+    \RightLabel{$ν_∞$}
+    \UnaryInfC{$\seq{γ}{ν_∞ X.F, Γ}$}
+    \DisplayProof\hfill
+    \AxiomC{$\seq{γ}{F, (F_i)_{i∈I}, (G_i)_{i∈J}}$}
+    \RightLabel{$⟨a⟩$}
+    \UnaryInfC{$\seq{γ}{⟨a⟩F, ([a]F_i)_{i∈I}, (□G_i)_{i∈J},Γ}$}
+  \end{prooftree}
+
+  \begin{prooftree}
+    \AxiomC{$\seq{γ}{F, (F_i)_{i∈I}}$}
+    \RightLabel{$\lozenge$}
+    \UnaryInfC{$\seq{γ}{\lozenge F, (□F_i)_{i∈I}, Γ}$}
+    \DisplayProof\hfill
+    \AxiomC{$\seq{γ}{(F_i)_{i∈I}}$}
+    \RightLabel{$\ocircle$}
+    \UnaryInfC{$\seq{γ}{(\ocircle F_i)_{i∈I}, Γ}$}
+  \end{prooftree}
+
+  \caption{Deduction rules of the system (without circularity).}
+  \label{fig:rules}
+\end{figure}
+The deduction rules of the system are given in Figure~\ref{fig:rules}. To
+prove a formula $A ∈ \forms$ amounts to deriving a proof of the sequent
+$\seq{∅}{¬A^*}$, where $A^*$ is defined as $A$, in which every size index
+under a least fixpoint has been replaced by a fresh size variable.
+
+\section{Semantics}
+
+\begin{defi}[Labelled transition systems]
+  A labelled transition system (LTS) $(S,A,T,N)$ is given by a finite
+  set of states $S$, a finite set of action $A$ and a transition
+  relation $T ⊂ S × A × S$ and a \emph{next} function $N$ from $S$ to $S$.
+  The next function is used to allow mixing LTL and logic for labelled
+  transition.
+\end{defi}
+
+\begin{defi}
+  From a LTS $(S,A,T,N)$ and an interpretation $I$ of propositions as a set
+  of states, and an interpretation of index variables as natural
+  numbers, we define the interpretation of any formula $F$ as
+  follows:
+  \begin{align*}
+    \sem{P} &= I(P) \cr
+    \sem{F ∧ G} &= \sem{F} ∩ \sem{G} \cr
+    \sem{F ∨ G} &= \sem{F} ∪ \sem{G} \cr
+    \sem{μ_0 X.F} &= ∅ \cr
+    \sem{μ_{n+1} X.F} &= \sem{F[X:= μ_n X.F} \cr
+    \sem{μ_∞ X.F} &= ⋃_{n∈\mathbb{N}} \sem{μ_n X.F} \cr
+    \sem{ν_0 X.F} &= S \cr
+    \sem{ν_{n+1} X.F} &= \sem{F[X:= ν_n X.F} \cr
+    \sem{ν_∞ X.F} &= ⋂_{n∈\mathbb{N}} \sem{ν_n X.F} \cr
+    \sem{\ocircle F} &= \{s∈S \st N(s) ∈ \sem{F}\} \cr
+    \sem{□ F} &= \{s∈S \st ∀a∈A, ∀t∈S, (s,a,t)∈T ⇒ t∈\sem{F} \}  \cr
+    \sem{\lozenge F} &= \{s∈S \st ∃a∈A, ∃t∈S, (s,a,t)∈T ∧ t∈\sem{F}\} \cr
+    \sem{[a] F} &= \{s∈S \st ∀t∈S, (s,a,t)∈T ⇒ t∈\sem{F} \}  \cr
+    \sem{⟨a⟩ F} &= \{s∈S \st ∃t∈S, (s,a,t)∈T ∧ t∈\sem{F} \}  \cr
+  \end{align*}
+
+\end{defi}
+\end{document}
