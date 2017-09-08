@@ -495,6 +495,29 @@ module Make(Act:Act)(Prop:Prop) = struct
     let index = create_symbol ctx.cgraph "I" names in
     (index, indexes)
 
+  let has_no_nu_deco m =
+    let rec fn m = match m with
+      | Nu(t1,i1,f1) ->
+         t1 = Inf &&
+           let (v,m) = unmbind vvar f1 in
+           Array.for_all fn m
+      | Mu(t1,i1,f1) ->
+         let (v,m) = unmbind vvar f1 in
+         Array.for_all fn m
+      | Disj(l1)
+      | Conj(l1) ->
+         List.for_all fn l1
+      | MAll(_,m1)
+      | MExi(_,m1)
+      | CAll(m1)
+      | CExi(m1)
+      | Next(m1) ->
+         fn m1
+      | VVar _ | Atom _ -> true
+      | IVar _ -> assert false
+    in
+    fn m
+
   (** Conversion to Debruijn *)
   let debruijn : modal -> dmodal = fun m ->
     let rec gn depth m =
@@ -822,6 +845,7 @@ module Make(Act:Act)(Prop:Prop) = struct
       let s0 = { empty_seq with posi = s.posi } in
       (** Common code for all case analysis *)
       let rec next_time : float -> context -> modal list -> bool = fun f ctx ms ->
+        let ms = List.filter has_no_nu_deco ms in
         if ms = [] then false else
         try
           let ctx = check_rec ctx ms in
