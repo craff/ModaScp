@@ -178,11 +178,25 @@ let spec = Arg.align
     , "check for validity" )
   ]
 
-let _ = Arg.parse spec (fun _ -> ()) ""
+
+let files =
+  let files = ref [] in
+  Arg.parse spec (fun name -> files := name :: ! files) "";
+  !files
+
+let treat_channel ch =
+  Earley.handle_exception (fun () ->
+      let f = Earley.parse_channel formula blank ch in
+      ignore (!action f)) ()
+
+let treat_file name =
+  Io.log "[%s]\n%!" name;
+  let ch = open_in name in
+  treat_channel ch;
+  close_in ch
 
 let main () =
-  Earley.handle_exception (fun () ->
-      let f = Earley.parse_channel formula blank stdin in
-      !action f) ()
+  if files = [] then treat_channel stdin
+  else List.iter treat_file files
 
 let _ = main ()
