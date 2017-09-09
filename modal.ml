@@ -126,7 +126,7 @@ module Make(Act:Act)(Prop:Prop) = struct
             let a' = msubst f' (canonical_vars f) in
             Array.iteri (fun i x ->
                 let y = a'.(i) in
-                if key x <> key y then raise Exit) a;
+                if x.address <> y.address then raise Exit) a;
             true
           with Exit -> false
         end
@@ -156,13 +156,11 @@ module Make(Act:Act)(Prop:Prop) = struct
       | _           , _           -> false
 
     let equal m1 m2 = equal' m1.data m2.data
-
     type t = modal
     let hash = hash
-    let equal = equal
   end
 
-  module WModal = Weak.Make(HModal)
+  module WModal = Hashtbl.Make(HModal)
   (** A total order on formulas, This order indirectly select the next
       litteral in the solver procedure, so changing it is not at all
       neutral *)
@@ -175,21 +173,129 @@ module Make(Act:Act)(Prop:Prop) = struct
     c := c' + 1;
     c'
 
-  let hashCons data =
+  let rec hashCons data =
     let key = HModal.hash' data in
     let address = get_addr () in
     let data' = { address; key; data } in
-    (*  Printf.eprintf "Hashing: %a ⇒ " print data';*)
+    (*Format.eprintf "Hashing: %a %d %d ⇒ " print data' key address;*)
     try
       let res = WModal.find hashtbl data' in
-      (*Printf.eprintf "Found %a\n%!" print res;*)
+      (*Format.eprintf "Found %a\n%!" print res;*)
       res
     with Not_found ->
-      (*Printf.eprintf "Not found\n%!";*)
-      WModal.add hashtbl data'; data'
+      (*Format.eprintf "Not found\n%!";*)
+      WModal.add hashtbl data' data';
+      data'
+
+  (** vvar as a function, for Bindlib *)
+  and vvar x = hashCons (VVar x)
+
+  (** Printing functions *)
+  and vprint ff v = sprint ff (name_of v)
+
+  and print ff m = match m.data with
+    | Atom a    -> Format.pp_print_string ff (Prop.to_string a)
+    | Conj []   -> Format.fprintf ff "⊤"
+    | Disj []   -> Format.fprintf ff "⊥"
+    | Conj l    -> Format.fprintf ff "(%a)" (lprint " ∧ " print) l
+    | Disj l    -> Format.fprintf ff "(%a)" (lprint " ∨ " print) l
+    | MAll(a,m) -> Format.fprintf ff "[%s]%a" (Act.to_string a) print m
+    | MExi(a,m) -> Format.fprintf ff "⟨%s⟩%a" (Act.to_string a) print m
+    | CAll(m)   -> Format.fprintf ff "[]%a" print m
+    | CExi(m)   -> Format.fprintf ff "⟨⟩%a" print m
+    | Next(m)   -> Format.fprintf ff "O%a" print m
+    | Mu(t,n,b) ->
+       let (names, ms) = unmbind vvar b in
+       Format.fprintf ff "μ(%a)_%d%a.(%a)" (aprint ", " vprint)
+                      names n tprint t (aprint ", " print) ms
+    | Nu(t,n,b) ->
+       let (names, ms) = unmbind vvar b in
+       Format.fprintf ff "ν(%a)_%d%a.(%a)" (aprint ", " vprint)
+                      names n tprint t (aprint ", " print) ms
+    | VVar v    -> vprint ff v
+    | IVar(d,n) -> Format.fprintf ff "IVar(%d,%d)" d n
+    | HVar(n)   -> Format.fprintf ff "HVar(%d)" n
+
+  let rec old_ileq m1 m2 =
+    let ileq = old_ileq in
+    if m1 == m2 then 0 else
+      match m1.data, m2.data with
+      | Atom(a1), Atom(a2) -> Prop.compare a1 a2
+      | Atom _, _ -> -1
+      | _, Atom _ -> 1
+      | Disj(l1), Disj(l2)
+      | Conj(l1), Conj(l2) ->
+         let rec gn ms1 ms2 =
+           match ms1,ms2 with
+           | [], [] -> 0
+           | [], _  -> 1
+           | _, []  -> -1
+           | m1::ms1, m2::ms2 ->
+              begin
+                match ileq m1 m2 with
+                | 0 -> gn ms1 ms2
+                | c -> c
+              end
+         in
+         gn l1 l2
+      | Disj _, _ -> -1
+      | _, Disj _ -> 1
+      | Conj _, _ -> -1
+      | _, Conj _ -> 1
+      | Nu(t1,i1,f1), Nu(t2,i2,f2)
+      | Mu(t1,i1,f1), Mu(t2,i2,f2) ->
+         begin
+           match compare i1 i2 with
+           | 0 ->
+              begin
+                match compare (mbinder_arity f1) (mbinder_arity f2) with
+                | 0 ->
+                   let (v,m) = unmbind vvar f1 in
+                   begin
+                     match ileq m.(i1) (msubst f2 (Array.map free_of v)).(i2) with
+                     | 0 -> compare_time t1 t2
+                     | c -> c
+                   end
+                | c -> c
+              end
+           | c -> c
+         end
+      | Nu _, _ -> -1
+      | _, Nu _ -> 1
+      | Mu _, _ -> -1
+      | _, Mu _ -> 1
+      | Next(m1), Next(m2) -> ileq m1 m2
+      | Next _, _ -> -1
+      | _, Next _ -> 1
+      | CAll(m1), CAll(m2)
+      | CExi(m1), CExi(m2) -> ileq m1 m2
+      | CAll _, _ -> -1
+      | _, CAll _ -> 1
+      | CExi _, _ -> -1
+      | _, CExi _ -> 1
+      | MAll(a1,m1), MAll(a2,m2)
+      | MExi(a1,m1), MExi(a2,m2) ->
+         begin
+           match Act.compare a1 a2 with
+           | 0 -> ileq m1 m2
+           | c -> c
+         end
+      | MAll _, _ -> -1
+      | _, MAll _ -> 1
+      | MExi _, _ -> -1
+      | _, MExi _ -> 1
+      | VVar(v1), VVar(v2) -> compare_vars v1 v2
+      (*| VVar _, _ -> -1
+      | _, VVar _ -> 1*)
+      | HVar _, _      -> assert false
+      | _     , HVar _ -> assert false
+      | IVar _, _
+      | _, IVar _ -> assert false
 
   let ileq m1 m2 =
-    if m1.address = m2.address then 0 else
+    if m1.address = m2.address then (assert (old_ileq m1 m2 = 0); 0) else
+      (assert (old_ileq m1 m2 <> 0 ||
+                 (Format.eprintf "%a  <>  %a\n" print m1 print m2; false));
       match m1.data, m2.data with
       | Atom _, Atom _ -> compare m1.address m2.address
       | Atom _, _      -> -1
@@ -226,7 +332,9 @@ module Make(Act:Act)(Prop:Prop) = struct
       | _     , VVar _ -> 1
       | HVar _, _      -> assert false
       | _     , HVar _ -> assert false
-      | IVar _, IVar _ -> assert false
+      | IVar _, IVar _ -> assert false)
+
+  let ileq = old_ileq
 
   module Mod = struct
     type t = modal
@@ -237,10 +345,6 @@ module Make(Act:Act)(Prop:Prop) = struct
   let index m = m.address
 
   (** Smart constructors *)
-
-  (** vvar as a function, for Bindlib *)
-  let vvar x = hashCons (VVar x)
-
   let atom' a = hashCons (Atom a)
   let atom a = box (atom' a)
 
@@ -409,32 +513,6 @@ module Make(Act:Act)(Prop:Prop) = struct
     let res = cmp_time t1 t2 in
     Io.log_cmp "cmp_time %a %a = %a\n" tprint t1 tprint t2 cprint res;
     res
-
-  (** Printing functions *)
-  let vprint ff v = sprint ff (name_of v)
-
-  let rec print ff m = match m.data with
-    | Atom a    -> Format.pp_print_string ff (Prop.to_string a)
-    | Conj []   -> Format.fprintf ff "⊤"
-    | Disj []   -> Format.fprintf ff "⊥"
-    | Conj l    -> Format.fprintf ff "(%a)" (lprint " ∧ " print) l
-    | Disj l    -> Format.fprintf ff "(%a)" (lprint " ∨ " print) l
-    | MAll(a,m) -> Format.fprintf ff "[%s]%a" (Act.to_string a) print m
-    | MExi(a,m) -> Format.fprintf ff "⟨%s⟩%a" (Act.to_string a) print m
-    | CAll(m)   -> Format.fprintf ff "[]%a" print m
-    | CExi(m)   -> Format.fprintf ff "⟨⟩%a" print m
-    | Next(m)   -> Format.fprintf ff "O%a" print m
-    | Mu(t,n,b) ->
-       let (names, ms) = unmbind vvar b in
-       Format.fprintf ff "μ(%a)_%d%a.(%a)" (aprint ", " vprint)
-                      names n tprint t (aprint ", " print) ms
-    | Nu(t,n,b) ->
-       let (names, ms) = unmbind vvar b in
-       Format.fprintf ff "ν(%a)_%d%a.(%a)" (aprint ", " vprint)
-                      names n tprint t (aprint ", " print) ms
-    | VVar v    -> vprint ff v
-    | IVar _    -> assert false
-    | HVar _    -> assert false
 
   (** negation *)
   let neg : modal -> modal = fun m ->
