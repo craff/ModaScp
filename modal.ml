@@ -345,6 +345,41 @@ module Make(Act:Act)(Prop:Prop) = struct
   let until f g = mu0 (fun x -> disj2 (conj2 f (next x)) g)
   let before f g = nu0 (fun x -> disj2 (conj2 f (next x)) g) (* CHECK ? *)
 
+  (** decorate: replace infinite time in mu with fresh variables *)
+  let decorate =
+    (** tries a little sharing ...
+        It seems to give a significative gain in some cases.  One
+        should do this more systematically, in particular for mu with
+        bound variables (bounded higher in the formula *)
+    let adone = ref [] in
+    let rec fn m =
+      try let (_, r) = List.find (fun (m',_) -> ileq m m' = 0) !adone in r
+      with Not_found ->
+        let res =
+          match m with
+          | Mu(t,n,b) ->
+             let t = if t = Inf then pred m t else t in
+             mu ~time:t n (mbinder_arity b)
+                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
+          | Nu(t,n,b) ->
+             nu ~time:t n (mbinder_arity b)
+                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
+          | Conj l -> conj (List.map fn l)
+          | Disj l -> disj (List.map fn l)
+          | MAll (a,m) -> mAll a (fn m)
+          | MExi (a,m) -> mExi a (fn m)
+          | CAll (m) -> cAll (fn m)
+          | CExi (m) -> cExi (fn m)
+          | Next (m) -> next (fn m)
+          | Atom b -> atom b
+          | VVar m -> box_of_var m
+          | IVar _ -> assert false
+        in
+        adone := (m,res)::!adone;
+        res
+    in
+    fun m -> unbox (fn m)
+
   (** Comparison of formulas, means in some sence subtyping
       or trivial implication *)
   let leq m1 m2 =
@@ -870,7 +905,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   let prove m0 =
     try
       Io.log_ver "PROVING: %a\n%!" print m0;
-      let m = neg m0 in
+      let m = decorate (neg m0) in
       let res = solver m in
       Format.printf (if res then "valid\n%!" else "invalid\n%!");
       res
@@ -882,7 +917,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   let sat m0 =
     try
       Io.log_ver "CHECKING SAT: %a\n%!" print m0;
-      let m = m0 in
+      let m = decorate m0 in
       let res = solver m in
       Format.printf (if res then "unsatifiable\n%!" else "satifiable\n%!");
       res
