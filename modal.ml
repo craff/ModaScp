@@ -189,7 +189,7 @@ module Make(Act:Act)(Prop:Prop) = struct
       WModal.add hashtbl data'; data'
 
   let ileq m1 m2 =
-    if m1.address == m2.address then 0 else
+    if m1.address = m2.address then 0 else
       match m1.data, m2.data with
       | Atom _, Atom _ -> compare m1.address m2.address
       | Atom _, _      -> -1
