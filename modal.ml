@@ -255,6 +255,48 @@ module Make(Act:Act)(Prop:Prop) = struct
   let nu0 ?(time=Inf) fn =
     nu ~time 0 1 (fun x -> [| fn x.(0) |])
 
+
+  type litteral =
+    | NAtom of Prop.t
+    | NRef of int
+    | NName of int   (* negation of NRef in fact *)
+    | NMAll of Act.t * formula * Scp.matrix
+    | NMExi of Act.t * formula * Scp.matrix
+    | NCAll of formula * Scp.matrix
+    | NCExi of formula * Scp.matrix
+    | NNext of formula * Scp.matrix
+
+   and clause = litteral list
+
+   and clauses = { clauses : clause list; arity : int }
+
+  type formula = clauses * time array
+
+  let rec to_formula m =
+
+  and to_clauses (times, clauses as acc) m =
+    | Conj ms ->
+       List.fold_left to_clauses acc ms
+    | Mu ... ->
+    | Nu ... ->
+    | m ->
+       let (times, clauses, clause) = to_clause (times, clauses, []) m in
+       let clause = Array.from_list clause in
+       (times, clause::clauses)
+
+  and to_clause (times, clauses, clause as acc) m =
+    | Conj _ ->
+       let n = new_ref () in
+       let (times, new_clauses) = to_clauses (times, []) m in
+       let new_clauses = List.map (fun l -> NRef n :: l) new_clauses in
+       (times, List.rev_append new_clauses clauses, NName n::clause)
+    | Disj ms ->
+       List.fold_left to_clause acc ms
+    | Mu ... ->
+    | Nu ... ->
+    | Atom a -> (times, clauses, NAtom a :: clause)
+                  ...
+
   (** lifting function *)
   let lift : modal -> modal bindbox = fun m ->
     let rec fn = function
