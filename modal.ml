@@ -31,7 +31,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   (** type of time, that can index mus and nus *)
   type time =
     | Inf              (** inifinite ordinal *)
-    | Var of (modal * int)
+    | Var of (int * int)
 
   (** Formula of the modal mu calculus + Next from LTL,
       Next means and transition, inclusing invisible ones *)
@@ -66,14 +66,6 @@ module Make(Act:Act)(Prop:Prop) = struct
     | Inf -> ()
     | Var(t,f) -> Format.fprintf ff "?"  (* FIXME *)
 
-  let pred m = function
-    | Inf      -> Var(m,0)
-    | Var(a,p) -> Var(a,p+1)
-
-  let pred' m = function
-    | Inf      -> Inf
-    | Var(a,p) -> Var(a,p+1)
-
   (** vvar as a function, for Bindlib *)
   let vvar x = VVar x
 
@@ -84,7 +76,7 @@ module Make(Act:Act)(Prop:Prop) = struct
     | Inf, Var _ -> 1
     | Inf, Inf -> 0
     | Var(m1,f1), Var(m2,f2) ->
-       match ileq m1 m2 with
+       match compare m1 m2 with
        | 0 -> f1 - f2
        | c -> c
 
@@ -164,45 +156,23 @@ module Make(Act:Act)(Prop:Prop) = struct
       | IVar _, _
       | _, IVar _ -> assert false
 
-  (** time comparison, return value expected by the scp *)
-  let cmp_time t1 t2 =
-    let open Sct in
-    let rec cmp_time t1 t2 =
-        if t1 == t2 then Zero else
-        match (t1, t2) with
-        | (Inf       , Inf       )                         -> assert false
-        | (_         , Inf       )                         -> Min1
-        | (Var(x1,p1), Var(x2,p2)) when ileq x1 x2 = 0 && p1 > p2 -> Min1
-        | (_         , _         )                         -> Infi
-    in
-    let res = cmp_time t1 t2 in
-    Io.log_cmp "cmp_time %a %a = %a\n" tprint t1 tprint t2 cprint res;
-    res
+  module Mod = struct
+    type t = modal
+    let compare = ileq
+  end
+  module MMap = Map.Make(Mod)
 
-  (** Printing functions *)
-  let vprint ff v = sprint ff (name_of v)
-
-  let rec print ff = function
-    | Atom a    -> Format.pp_print_string ff (Prop.to_string a)
-    | Conj []   -> Format.fprintf ff "⊤"
-    | Disj []   -> Format.fprintf ff "⊥"
-    | Conj l    -> Format.fprintf ff "(%a)" (lprint " ∧ " print) l
-    | Disj l    -> Format.fprintf ff "(%a)" (lprint " ∨ " print) l
-    | MAll(a,m) -> Format.fprintf ff "[%s]%a" (Act.to_string a) print m
-    | MExi(a,m) -> Format.fprintf ff "⟨%s⟩%a" (Act.to_string a) print m
-    | CAll(m)   -> Format.fprintf ff "[]%a" print m
-    | CExi(m)   -> Format.fprintf ff "⟨⟩%a" print m
-    | Next(m)   -> Format.fprintf ff "O%a" print m
-    | Mu(t,n,b) ->
-       let (names, ms) = unmbind vvar b in
-       Format.fprintf ff "μ(%a)_%d%a.(%a)" (aprint ", " vprint)
-                      names n tprint t (aprint ", " print) ms
-    | Nu(t,n,b) ->
-       let (names, ms) = unmbind vvar b in
-       Format.fprintf ff "ν(%a)_%d%a.(%a)" (aprint ", " vprint)
-                      names n tprint t (aprint ", " print) ms
-    | VVar v    -> vprint ff v
-    | IVar _    -> assert false
+  let index =
+    let map = ref MMap.empty in
+    let c = ref 0 in
+    (fun m ->
+      try
+        MMap.find m !map
+      with Not_found ->
+        let n = !c in
+        c := n + 1;
+        map := MMap.add m n !map;
+        n)
 
   (** Smart constructors *)
   let atom a = box (Atom a)
@@ -306,6 +276,88 @@ module Make(Act:Act)(Prop:Prop) = struct
       | IVar _ -> assert false
     in
     fn m
+
+  (** decorate: replace infinite time in mu with fresh variables *)
+  let undecorate =
+    (** tries a little sharing ...
+        It seems to give a significative gain in some cases.  One
+        should do this more systematically, in particular for mu with
+        bound variables (bounded higher in the formula *)
+    let adone = ref [] in
+    let rec fn m =
+      try let (_, r) = List.find (fun (m',_) -> ileq m m' = 0) !adone in r
+      with Not_found ->
+        let res =
+          match m with
+          | Mu(t,n,b) ->
+             mu n (mbinder_arity b)
+                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
+          | Nu(t,n,b) ->
+             nu n (mbinder_arity b)
+                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
+          | Conj l -> conj (List.map fn l)
+          | Disj l -> disj (List.map fn l)
+          | MAll (a,m) -> mAll a (fn m)
+          | MExi (a,m) -> mExi a (fn m)
+          | CAll (m) -> cAll (fn m)
+          | CExi (m) -> cExi (fn m)
+          | Next (m) -> next (fn m)
+          | Atom b -> atom b
+          | VVar m -> box_of_var m
+          | IVar _ -> assert false
+        in
+        adone := (m,res)::!adone;
+        res
+    in
+    fun m -> unbox (fn m)
+
+  let pred m = function
+    | Inf      -> Var(index (undecorate m),0)
+    | Var(a,p) -> Var(a,p+1)
+
+  let pred' m = function
+    | Inf      -> Inf
+    | Var(a,p) -> Var(a,p+1)
+
+  (** time comparison, return value expected by the scp *)
+  let cmp_time t1 t2 =
+    let open Sct in
+    let rec cmp_time t1 t2 =
+        if t1 == t2 then Zero else
+        match (t1, t2) with
+        | (Inf       , Inf       )                         -> assert false
+        | (_         , Inf       )                         -> Min1
+        | (Var(x1,p1), Var(x2,p2)) when x1 = x2 && p1 > p2 -> Min1
+        | (_         , _         )                         -> Infi
+    in
+    let res = cmp_time t1 t2 in
+    Io.log_cmp "cmp_time %a %a = %a\n" tprint t1 tprint t2 cprint res;
+    res
+
+  (** Printing functions *)
+  let vprint ff v = sprint ff (name_of v)
+
+  let rec print ff = function
+    | Atom a    -> Format.pp_print_string ff (Prop.to_string a)
+    | Conj []   -> Format.fprintf ff "⊤"
+    | Disj []   -> Format.fprintf ff "⊥"
+    | Conj l    -> Format.fprintf ff "(%a)" (lprint " ∧ " print) l
+    | Disj l    -> Format.fprintf ff "(%a)" (lprint " ∨ " print) l
+    | MAll(a,m) -> Format.fprintf ff "[%s]%a" (Act.to_string a) print m
+    | MExi(a,m) -> Format.fprintf ff "⟨%s⟩%a" (Act.to_string a) print m
+    | CAll(m)   -> Format.fprintf ff "[]%a" print m
+    | CExi(m)   -> Format.fprintf ff "⟨⟩%a" print m
+    | Next(m)   -> Format.fprintf ff "O%a" print m
+    | Mu(t,n,b) ->
+       let (names, ms) = unmbind vvar b in
+       Format.fprintf ff "μ(%a)_%d%a.(%a)" (aprint ", " vprint)
+                      names n tprint t (aprint ", " print) ms
+    | Nu(t,n,b) ->
+       let (names, ms) = unmbind vvar b in
+       Format.fprintf ff "ν(%a)_%d%a.(%a)" (aprint ", " vprint)
+                      names n tprint t (aprint ", " print) ms
+    | VVar v    -> vprint ff v
+    | IVar _    -> assert false
 
   (** negation *)
   let neg : modal -> modal = fun m ->
@@ -929,7 +981,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   let prove m0 =
     try
       Io.log_ver "PROVING: %a\n%!" print m0;
-      let m = decorate (neg m0) in
+      let m = (*decorate*) (neg m0) in
       let res = solver m in
       Format.printf (if res then "valid\n%!" else "invalid\n%!");
       res
@@ -941,7 +993,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   let sat m0 =
     try
       Io.log_ver "CHECKING SAT: %a\n%!" print m0;
-      let m = decorate m0 in
+      let m = (*decorate*) m0 in
       let res = solver m in
       Format.printf (if res then "unsatifiable\n%!" else "satifiable\n%!");
       res
