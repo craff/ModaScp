@@ -35,7 +35,13 @@ module Make(Act:Act)(Prop:Prop) = struct
 
   (** Formula of the modal mu calculus + Next from LTL,
       Next means and transition, inclusing invisible ones *)
-  and modal =
+   and modal = {
+       address: int;
+       key: int;
+       data: modal'
+     }
+
+   and modal' =
     (** Logical connectives *)
     | Atom of Prop.t        (** atomic formulas, denotes a set of states *)
     | Conj of modal list    (** conjonction *)
@@ -59,6 +65,7 @@ module Make(Act:Act)(Prop:Prop) = struct
     | Nu   of time * int * (modal, modal array) mbinder (** Greatest fixpoint *)
 
     | VVar of modal var
+    | HVar of int
     | IVar of int * int
 
   (* Time printing *)
@@ -66,8 +73,9 @@ module Make(Act:Act)(Prop:Prop) = struct
     | Inf -> ()
     | Var(t,f) -> Format.fprintf ff "?"  (* FIXME *)
 
-  (** vvar as a function, for Bindlib *)
-  let vvar x = VVar x
+  let key m = m.key
+
+  let hash m = m.key
 
   (** total order on time *)
   let rec compare_time t1 t2 =
@@ -80,81 +88,145 @@ module Make(Act:Act)(Prop:Prop) = struct
        | 0 -> f1 - f2
        | c -> c
 
+  module HModal = struct
+    let mkHVar n = { address = -n; key = Hashtbl.hash (`HVar, n); data = HVar n }
+
+    let canonical_vars f =
+      let occurs = mbinder_occurs f in
+      let i = ref 0 in
+      let r = mbinder_rank f in
+      Array.map (fun b ->
+          let n = if b then (incr i; r + !i) else 0 in
+          mkHVar n) occurs
+
+    let hash_mbinder f =
+      Hashtbl.hash(mbinder_occurs f,Array.map key (msubst f (canonical_vars f)))
+
+    let hash' = function
+      | HVar n      -> Hashtbl.hash (`HVar, n)
+      | VVar v      -> hash_var v
+      | Atom a      -> Hashtbl.hash (`Atom, a)
+      | Conj l      -> Hashtbl.hash (`Conj, List.map key l)
+      | Disj l      -> Hashtbl.hash (`Disj, List.map key l)
+      | MAll (a, m) -> Hashtbl.hash (`MAll, a, key m)
+      | MExi (a, m) -> Hashtbl.hash (`MExi, a, key m)
+      | CAll m      -> Hashtbl.hash (`CAll, key m)
+      | CExi m      -> Hashtbl.hash (`CExi, key m)
+      | Next m      -> Hashtbl.hash (`Next, key m)
+      | Mu(t,i,f)   -> Hashtbl.hash (`Mu,t,i,hash_mbinder f)
+      | Nu(t,i,f)   -> Hashtbl.hash (`Nu,t,i,hash_mbinder f)
+      | IVar(n,m)   -> Hashtbl.hash (`IVar,n,m)
+
+    let equal_mbinder f f' =
+      mbinder_rank f = mbinder_rank f' &&
+        mbinder_occurs f = mbinder_occurs f' &&
+        begin
+          try
+            let a  = msubst f  (canonical_vars f) in
+            let a' = msubst f' (canonical_vars f) in
+            Array.iteri (fun i x ->
+                let y = a'.(i) in
+                if key x <> key y then raise Exit) a;
+            true
+          with Exit -> false
+        end
+
+    let equal' m1 m2 = m1 == m2 || match (m1, m2) with
+      | HVar n1     , HVar n2     -> n1 = n2
+      | VVar v1     , VVar v2     -> compare_vars v1 v2 = 0
+      | Atom a1     , Atom a2     -> Prop.compare a1 a2 = 0
+      | Conj l1     , Conj l2     ->
+         List.length l1 = List.length l2 &&
+           List.for_all2 (fun x y -> x.address = y.address) l1 l2
+      | Disj l1     , Disj l2     ->
+         List.length l1 = List.length l2 &&
+           List.for_all2 (fun x y -> x.address = y.address) l1 l2
+      | MAll(a1, m1), MAll(a2,m2) ->
+         Act.compare a1 a2 = 0 && m1.address = m2.address
+      | MExi(a1, m1), MExi(a2,m2) ->
+         Act.compare a1 a2 = 0 && m1.address = m2.address
+      | CAll(m1)    , CAll(m2)    -> m1.address = m2.address
+      | CExi(m1)    , CExi(m2)    -> m1.address = m2.address
+      | Next(m1)    , Next(m2)    -> m1.address = m2.address
+      | Mu(t1,i1,f1), Mu(t2,i2,f2)->
+         i1 = i2 && compare_time t1 t2 = 0 && equal_mbinder f1 f2
+      | Nu(t1,i1,f1), Nu(t2,i2,f2)->
+         i1 = i2 && compare_time t1 t2 = 0 && equal_mbinder f1 f2
+      | IVar(n1,m1) , IVar(n2,m2) -> n1 = n2 && m1 = m2
+      | _           , _           -> false
+
+    let equal m1 m2 = equal' m1.data m2.data
+
+    type t = modal
+    let hash = hash
+    let equal = equal
+  end
+
+  module WModal = Weak.Make(HModal)
   (** A total order on formulas, This order indirectly select the next
       litteral in the solver procedure, so changing it is not at all
       neutral *)
-  and ileq m1 m2 =
-    if m1 == m2 then 0 else
-      match m1, m2 with
-      | Atom(a1), Atom(a2) -> Prop.compare a1 a2
-      | Atom _, _ -> -1
-      | _, Atom _ -> 1
-      | Disj(l1), Disj(l2)
-      | Conj(l1), Conj(l2) ->
-         let rec gn ms1 ms2 =
-           match ms1,ms2 with
-           | [], [] -> 0
-           | [], _  -> 1
-           | _, []  -> -1
-           | m1::ms1, m2::ms2 ->
-              begin
-                match ileq m1 m2 with
-                | 0 -> gn ms1 ms2
-                | c -> c
-              end
-         in
-         gn l1 l2
-      | Disj _, _ -> -1
-      | _, Disj _ -> 1
-      | Conj _, _ -> -1
-      | _, Conj _ -> 1
-      | Nu(t1,i1,f1), Nu(t2,i2,f2)
-      | Mu(t1,i1,f1), Mu(t2,i2,f2) ->
-         begin
-           match compare i1 i2 with
-           | 0 ->
-              begin
-                match compare (mbinder_arity f1) (mbinder_arity f2) with
-                | 0 ->
-                   let (v,m) = unmbind vvar f1 in
-                   begin
-                     match ileq m.(i1) (msubst f2 (Array.map free_of v)).(i2) with
-                     | 0 -> compare_time t1 t2
-                     | c -> c
-                   end
-                | c -> c
-              end
-           | c -> c
-         end
-      | Nu _, _ -> -1
-      | _, Nu _ -> 1
-      | Mu _, _ -> -1
-      | _, Mu _ -> 1
-      | Next(m1), Next(m2) -> ileq m1 m2
-      | Next _, _ -> -1
-      | _, Next _ -> 1
-      | CAll(m1), CAll(m2)
-      | CExi(m1), CExi(m2) -> ileq m1 m2
-      | CAll _, _ -> -1
-      | _, CAll _ -> 1
-      | CExi _, _ -> -1
-      | _, CExi _ -> 1
-      | MAll(a1,m1), MAll(a2,m2)
-      | MExi(a1,m1), MExi(a2,m2) ->
-         begin
-           match Act.compare a1 a2 with
-           | 0 -> ileq m1 m2
-           | c -> c
-         end
-      | MAll _, _ -> -1
-      | _, MAll _ -> 1
-      | MExi _, _ -> -1
-      | _, MExi _ -> 1
-      | VVar(v1), VVar(v2) -> compare_vars v1 v2
-      (*| VVar _, _ -> -1
-      | _, VVar _ -> 1*)
-      | IVar _, _
-      | _, IVar _ -> assert false
+
+  let hashtbl = WModal.create 1001
+  let get_addr =
+    let c = ref 1 in
+    fun () ->
+    let c' = !c in
+    c := c' + 1;
+    c'
+
+  let hashCons data =
+    let key = HModal.hash' data in
+    let address = get_addr () in
+    let data' = { address; key; data } in
+    (*  Printf.eprintf "Hashing: %a ⇒ " print data';*)
+    try
+      let res = WModal.find hashtbl data' in
+      (*Printf.eprintf "Found %a\n%!" print res;*)
+      res
+    with Not_found ->
+      (*Printf.eprintf "Not found\n%!";*)
+      WModal.add hashtbl data'; data'
+
+  let ileq m1 m2 =
+    if m1.address == m2.address then 0 else
+      match m1.data, m2.data with
+      | Atom _, Atom _ -> compare m1.address m2.address
+      | Atom _, _      -> -1
+      | _     , Atom _ -> 1
+      | Disj _, Disj _ -> compare m1.address m2.address
+      | Disj _, _      -> -1
+      | _     , Disj _ -> 1
+      | Conj _, Conj _ -> compare m1.address m2.address
+      | Conj _, _      -> -1
+      | _, Conj _      -> 1
+      | Nu   _, Nu   _ -> compare m1.address m2.address
+      | Nu   _, _      -> -1
+      | _     , Nu   _ -> 1
+      | Mu   _, Mu   _ -> compare m1.address m2.address
+      | Mu   _, _      -> -1
+      | _     , Mu   _ -> 1
+      | Next _, Next _ -> compare m1.address m2.address
+      | Next _, _      -> -1
+      | _     , Next _ -> 1
+      | CAll _, CAll _ -> compare m1.address m2.address
+      | CAll _, _      -> -1
+      | _, CAll _      -> 1
+      | CExi _, CExi _ -> compare m1.address m2.address
+      | CExi _, _      -> -1
+      | _     , CExi _ -> 1
+      | MAll _, MAll _ -> compare m1.address m2.address
+      | MAll _, _      -> -1
+      | _     , MAll _ -> 1
+      | MExi _, MExi _ -> compare m1.address m2.address
+      | MExi _, _      -> -1
+      | _     , MExi _ -> 1
+      | VVar _, VVar _ -> compare m1.address m2.address
+      | VVar _, _      -> -1
+      | _     , VVar _ -> 1
+      | HVar _, _      -> assert false
+      | _     , HVar _ -> assert false
+      | IVar _, IVar _ -> assert false
 
   module Mod = struct
     type t = modal
@@ -162,89 +234,91 @@ module Make(Act:Act)(Prop:Prop) = struct
   end
   module MMap = Map.Make(Mod)
 
-  let index =
-    let map = ref MMap.empty in
-    let c = ref 0 in
-    (fun m ->
-      try
-        MMap.find m !map
-      with Not_found ->
-        let n = !c in
-        c := n + 1;
-        map := MMap.add m n !map;
-        n)
+  let index m = m.address
 
   (** Smart constructors *)
-  let atom a = box (Atom a)
+
+  (** vvar as a function, for Bindlib *)
+  let vvar x = hashCons (VVar x)
+
+  let atom' a = hashCons (Atom a)
+  let atom a = box (atom' a)
 
   (** Sorting and simplifiying disjunction *)
-  let _Disj l =
-    let rec fn acc = function
+  let _Disj (l:modal list) =
+    let rec fn acc m = match m.data with
       | Conj [] -> raise Exit (* True in a disjunction *)
       | Disj l' -> List.fold_left fn acc l'
-      | m -> m::acc
+      | _ -> m::acc
     in
     try
       let l = List.fold_left fn [] l in
       let l = List.sort_uniq ileq l in
       match l with
       | [m] -> m
-      | _ -> Disj l
+      | _ -> hashCons (Disj l)
     with Exit ->
-      Conj []
+      hashCons (Conj [])
 
   (** Sorting and simplifiying conjunction *)
   let _Conj l =
-    let rec fn acc = function
+    let rec fn acc m = match m.data with
       | Disj [] -> raise Exit (* False in a conjonction *)
       | Conj l' -> List.fold_left fn acc l'
-      | m -> m::acc
+      | _ -> m::acc
     in
     try
       let l = List.fold_left fn [] l in
       let l = List.sort_uniq ileq l in
       match l with
       | [m] -> m
-      | _ -> Conj l
+      | _ -> hashCons (Conj l)
     with Exit ->
-      Disj []
+      hashCons (Disj [])
 
   let conj l = box_apply (fun x -> _Conj x) (box_list l)
   let disj l = box_apply (fun x -> _Disj x) (box_list l)
 
   let always = conj []
   let never  = disj []
+  let always' = unbox always
+  let never'  = unbox never
 
-  let mAll a m = box_apply (fun x -> MAll(a,x)) m
-  let mExi a m = box_apply (fun x -> MExi(a,x)) m
-  let cAll m = box_apply (fun x -> CAll(x)) m
-  let cExi m = box_apply (fun x -> CExi(x)) m
-  let next m = box_apply (fun x -> Next(x)) m
+  let mAll' a m = hashCons (MAll(a,m))
+  let mAll  a m = box_apply (mAll' a) m
+  let mExi' a m = hashCons (MExi(a,m))
+  let mExi  a m = box_apply (mExi' a) m
+  let cAll' m = hashCons (CAll(m))
+  let cAll  m = box_apply cAll'  m
+  let cExi' m = hashCons (CExi(m))
+  let cExi  m = box_apply cExi' m
+  let next' m = hashCons (Next(m))
+  let next  m = box_apply next' m
 
   (** mu and nu smart constructors given in two variants, with
       function [mu] and [nu] taking an array of [modal box] and [mu']
       and [nu'] an array of [modal var] *)
   let mu ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
-    box_apply (fun x -> Mu(time,idx,x))
+    box_apply (fun x -> hashCons (Mu(time,idx,x)))
               (mbind vvar names
                       (fun xs -> box_array (fn xs)))
 
   let mu' ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
-    box_apply (fun x -> Mu(time,idx,x))
+    box_apply (fun x -> hashCons (Mu(time,idx,x)))
               (mvbind vvar names
                       (fun xs -> box_array (fn xs)))
 
   let nu ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
-    box_apply (fun x -> Nu(time,idx,x))
+    box_apply (fun x -> hashCons (Nu(time,idx,x)))
               (mbind vvar names
                       (fun xs -> box_array (fn xs)))
 
   let nu' ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
-    box_apply (fun x -> Nu(time,idx,x))
+    box_apply (fun x -> hashCons (Nu(time,idx,x)))
               (mvbind vvar names
                       (fun xs -> box_array (fn xs)))
 
@@ -257,7 +331,7 @@ module Make(Act:Act)(Prop:Prop) = struct
 
   (** lifting function *)
   let lift : modal -> modal bindbox = fun m ->
-    let rec fn = function
+    let rec fn m = match m.data with
       | Mu(t,n,b) ->
          mu' ~time:t n (mbinder_arity b)
             (fun xs -> Array.map fn (msubst b (Array.map free_of xs)))
@@ -274,6 +348,7 @@ module Make(Act:Act)(Prop:Prop) = struct
       | Atom b -> atom b
       | VVar m -> box_of_var m
       | IVar _ -> assert false
+      | HVar _ -> assert false
     in
     fn m
 
@@ -288,7 +363,7 @@ module Make(Act:Act)(Prop:Prop) = struct
       try let (_, r) = List.find (fun (m',_) -> ileq m m' = 0) !adone in r
       with Not_found ->
         let res =
-          match m with
+          match m.data with
           | Mu(t,n,b) ->
              mu n (mbinder_arity b)
                 (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
@@ -305,6 +380,7 @@ module Make(Act:Act)(Prop:Prop) = struct
           | Atom b -> atom b
           | VVar m -> box_of_var m
           | IVar _ -> assert false
+          | HVar _ -> assert false
         in
         adone := (m,res)::!adone;
         res
@@ -337,7 +413,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   (** Printing functions *)
   let vprint ff v = sprint ff (name_of v)
 
-  let rec print ff = function
+  let rec print ff m = match m.data with
     | Atom a    -> Format.pp_print_string ff (Prop.to_string a)
     | Conj []   -> Format.fprintf ff "⊤"
     | Disj []   -> Format.fprintf ff "⊥"
@@ -358,10 +434,11 @@ module Make(Act:Act)(Prop:Prop) = struct
                       names n tprint t (aprint ", " print) ms
     | VVar v    -> vprint ff v
     | IVar _    -> assert false
+    | HVar _    -> assert false
 
   (** negation *)
   let neg : modal -> modal = fun m ->
-    let rec fn = function
+    let rec fn m = match m.data with
       | Mu(t,n,b) ->
          nu ~time:t n (mbinder_arity b)
             (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
@@ -378,6 +455,7 @@ module Make(Act:Act)(Prop:Prop) = struct
       | Atom b -> atom (Prop.neg b)
       | VVar m -> box_of_var m
       | IVar _ -> assert false
+      | HVar _ -> assert false
     in
     unbox (fn m)
 
@@ -404,11 +482,11 @@ module Make(Act:Act)(Prop:Prop) = struct
         should do this more systematically, in particular for mu with
         bound variables (bounded higher in the formula *)
     let adone = ref [] in
-    let rec fn m =
+    let rec fn m = (* FIXME: optimise *)
       try let (_, r) = List.find (fun (m',_) -> ileq m m' = 0) !adone in r
       with Not_found ->
         let res =
-          match m with
+          match m.data with
           | Mu(t,n,b) ->
              let t = if t = Inf then pred m t else t in
              mu ~time:t n (mbinder_arity b)
@@ -426,6 +504,7 @@ module Make(Act:Act)(Prop:Prop) = struct
           | Atom b -> atom b
           | VVar m -> box_of_var m
           | IVar _ -> assert false
+          | HVar _ -> assert false
         in
         adone := (m,res)::!adone;
         res
@@ -437,7 +516,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   let leq m1 m2 =
     let rec fn m1 m2 =
       if m1 == m2 then true else
-      match m1, m2 with
+      match m1.data, m2.data with
       | Nu(t1,i1,f1), Nu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
          cmp_time t2 t1 <= Zero &&
            let (v,m) = unmbind vvar f1 in
@@ -477,12 +556,12 @@ module Make(Act:Act)(Prop:Prop) = struct
 
   (** Printing for sequent *)
   let seq_to_modal acc s =
-    let acc = List.fold_left (fun acc a -> Atom a :: acc) acc s.atom in
-    let acc = List.fold_left (fun acc (a,m) -> MAll (a,m) :: acc) acc s.mAll in
-    let acc = List.fold_left (fun acc (a,m) -> MExi (a,m) :: acc) acc s.mExi in
-    let acc = List.fold_left (fun acc m -> CAll (m) :: acc) acc s.cAll in
-    let acc = List.fold_left (fun acc m -> CExi (m) :: acc) acc s.cExi in
-    let acc = List.fold_left (fun acc m -> Next (m) :: acc) acc s.next in
+    let acc = List.fold_left (fun acc a -> atom' a :: acc) acc s.atom in
+    let acc = List.fold_left (fun acc (a,m) -> mAll' a m :: acc) acc s.mAll in
+    let acc = List.fold_left (fun acc (a,m) -> mExi' a m :: acc) acc s.mExi in
+    let acc = List.fold_left (fun acc m -> cAll' m :: acc) acc s.cAll in
+    let acc = List.fold_left (fun acc m -> cExi' m :: acc) acc s.cExi in
+    let acc = List.fold_left (fun acc m -> next' m :: acc) acc s.next in
     let acc = List.fold_left (fun acc m -> m :: acc) acc s.disj in
     let acc = List.fold_left (fun acc m -> m :: acc) acc s.blnu in
     acc
@@ -553,7 +632,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   let mk_indhyp ctx ms =
     let res = ref [] in
     let rec fn m1 =
-      match m1 with
+      match m1.data with
       | Nu(t1,i1,f1) ->
          if t1 != Inf && not (List.exists (fun t -> compare_time t1 t = 0) !res)
          then res := t1 :: !res;
@@ -574,6 +653,7 @@ module Make(Act:Act)(Prop:Prop) = struct
       | Next(m1) ->
          fn m1
       | VVar _ | Atom _ -> ()
+      | HVar _ -> assert false
       | IVar _ -> assert false
     in
     let _ = List.iter fn ms in
@@ -583,7 +663,7 @@ module Make(Act:Act)(Prop:Prop) = struct
     (index, indexes)
 
   let has_no_nu_deco m =
-    let rec fn m = match m with
+    let rec fn m = match m.data with
       | Nu(t1,i1,f1) ->
          t1 = Inf &&
            let (v,m) = unmbind vvar f1 in
@@ -601,20 +681,22 @@ module Make(Act:Act)(Prop:Prop) = struct
       | Next(m1) ->
          fn m1
       | VVar _ | Atom _ -> true
+      | HVar _ -> assert false
       | IVar _ -> assert false
     in
     fn m
 
-  (** Conversion to Debruijn *)
+  (** Conversion to Debruijn *) (* FIXME: can optimise ? *)
   let debruijn : modal -> dmodal = fun m ->
+    let iVar depth n = hashCons(IVar(depth,n)) in
     let rec gn depth m =
       let fn = gn depth in
-      match m with
+      match m.data with
       | Mu(t,n,b) ->
-         let vars = Array.init (mbinder_arity b) (fun n -> IVar(depth,n)) in
+         let vars = Array.init (mbinder_arity b) (fun n -> iVar depth n) in
          DMu(n, Array.map (gn (depth + 1)) (msubst b vars))
       | Nu(t,n,b) ->
-         let vars = Array.init (mbinder_arity b) (fun n -> IVar(depth,n)) in
+         let vars = Array.init (mbinder_arity b) (fun n -> iVar depth n) in
          DNu(n, Array.map (gn (depth + 1)) (msubst b vars))
       | Conj l -> DConj (List.map fn l)
       | Disj l -> DDisj (List.map fn l)
@@ -625,6 +707,7 @@ module Make(Act:Act)(Prop:Prop) = struct
       | Next (m) -> DNext(fn m)
       | Atom b -> DAtom b
       | IVar(d,n) -> DIVar(depth-d,n)
+      | HVar m -> assert false
       | VVar m -> assert false
     in
     gn 0 m
@@ -636,7 +719,7 @@ module Make(Act:Act)(Prop:Prop) = struct
     let memo = ref [] in
     let ms = List.map (fun m -> (m, debruijn m)) ms in
     let rec fn m1 m2 =
-      match m1, m2 with
+      match m1.data, m2.data with
       | Nu(t1,i1,f1), Nu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
          if t1 != Inf && not (List.exists (fun t -> compare_time t1 t = 0) !memo)
          then (res := t2 :: !res; memo := t1 :: !memo);
@@ -780,27 +863,27 @@ module Make(Act:Act)(Prop:Prop) = struct
   let simplify a m =
     let a' = neg a in
     let rec simplify m =
-      if leq a m then Conj[]
-      else if leq m a' then Disj[]
+      if leq a m then always'
+      else if leq m a' then never'
       else
-        match m with
+        match m.data with
         | Conj l -> _Conj (List.map simplify l)
         | Disj l -> _Disj (List.map simplify l)
-        | m -> m
+        | _ -> m
     in
     let m = simplify m in
-    if m = Disj[] then raise Exit; m
+    if m == never' then raise Exit; m
 
   (** simplify a formula, knowing a sequent *)
   let seq_simplify s m =
     (** No need to simplify a Mu of Nu, they will be expanded *)
-    match m with Mu _ | Nu _ -> m | _ ->
-    let m = List.fold_left (fun m a -> simplify (Atom a) m) m s.atom in
-    let m = List.fold_left (fun m (a,m') -> simplify (MAll (a,m')) m) m s.mAll in
-    let m = List.fold_left (fun m (a,m') -> simplify (MExi (a,m')) m) m s.mExi in
-    let m = List.fold_left (fun m m' -> simplify (CAll m') m) m s.cAll in
-    let m = List.fold_left (fun m m' -> simplify (CExi m') m) m s.cExi in
-    let m = List.fold_left (fun m m' -> simplify (Next m') m) m s.next in
+    match m.data with Mu _ | Nu _ -> m | _ ->
+    let m = List.fold_left (fun m a -> simplify (atom' a) m) m s.atom in
+    let m = List.fold_left (fun m (a,m') -> simplify (mAll' a m') m) m s.mAll in
+    let m = List.fold_left (fun m (a,m') -> simplify (mExi' a m') m) m s.mExi in
+    let m = List.fold_left (fun m m' -> simplify (cAll' m') m) m s.cAll in
+    let m = List.fold_left (fun m m' -> simplify (cExi' m') m) m s.cExi in
+    let m = List.fold_left (fun m m' -> simplify (next' m') m) m s.next in
     (** Simplification by blocked nu and disjunction are not worth it *)
     (*let m = List.fold_left (fun m m' -> simplify m' m) m s.disj in
       let m = List.fold_left (fun m m' -> simplify m' m) m s.blnu in
@@ -813,17 +896,17 @@ module Make(Act:Act)(Prop:Prop) = struct
   let simplify_seq ms m s =
     (** No need to simplify by conjunction, they will be splitted *)
     (** Simplification by disjunction is not worst it either *)
-    match m with Conj _ | Disj _ -> (ms, s) | _ ->
+    match m.data with Conj _ | Disj _ -> (ms, s) | _ ->
     (** disjunction can be simplyfied by anything *)
     let disj = List.map (simplify m) s.disj in
     let (ms, disj) = List.fold_left (fun (ms, d) m' ->
-                         match m' with
+                         match m'.data with
                          | Disj (_::_::_) -> (ms, m'::d)
                          | Disj _ -> assert false
                          | _ -> (m'::ms, d)) (ms, []) disj
     in
     let s = { s with disj } in
-    match m with
+    match m.data with
     | Atom(a) ->
        let atom = List.filter (fun a' ->
                       if Prop.(imply a' (neg a)) then raise Exit;
@@ -858,7 +941,7 @@ module Make(Act:Act)(Prop:Prop) = struct
        (ms, s)
     | Disj _ | Mu _ | Nu _ | Conj _  ->
        (ms, s)
-    | VVar _ | IVar _ -> assert false
+    | VVar _ | IVar _ | HVar _ -> assert false
 
   (** Add a list of formulas to a sequent *)
   let rec add_to_seq s ms =
@@ -867,7 +950,7 @@ module Make(Act:Act)(Prop:Prop) = struct
     | m::ms ->
        let m = Chrono.add_time chr_simp (seq_simplify s) m in
        let (ms, s) = Chrono.add_time chr_simp (simplify_seq ms m) s in
-       match m with
+       match m.data with
        | Atom a -> add_to_seq {s with atom = a::s.atom } ms
        | Conj l -> add_to_seq s (l@ms)
        | Disj [] -> raise Exit
@@ -877,15 +960,17 @@ module Make(Act:Act)(Prop:Prop) = struct
        | Mu(t,i,f) ->
           let s = { s with posi = t::s.posi } in
           let (ubnu,blnu) =
-            List.partition (function Nu(t',_,_) -> compare_time t t' = 0 | _ -> false) s.blnu
+            List.partition (fun m -> match m.data with Nu(t',_,_) ->
+                                                       compare_time t t' = 0
+                                                     | _ -> false) s.blnu
           in
           let s = { s with blnu } in
-          let v = Array.init (mbinder_arity f) (fun i -> Mu(pred m t,i,f)) in
+          let v = Array.init (mbinder_arity f) (fun i -> hashCons(Mu(pred m t,i,f))) in
           let m = (msubst f v).(i) in
           add_to_seq s (m::ubnu@ms)
        | Nu(t,i,f) when t == Inf
                      || List.exists (fun t0 -> compare_time t0 t = 0) s.posi ->
-          let v = Array.init (mbinder_arity f) (fun i -> Nu(pred' m t,i,f)) in
+          let v = Array.init (mbinder_arity f) (fun i -> hashCons(Nu(pred' m t,i,f))) in
           let m = (msubst f v).(i) in
           add_to_seq s (m::ms)
        | Nu(t,i,f) ->
@@ -896,7 +981,7 @@ module Make(Act:Act)(Prop:Prop) = struct
        | CExi(m) -> add_to_seq { s with cExi = m::s.cExi } ms
        | Next(m) ->
           add_to_seq { s with next = m::s.next } ms
-       | VVar _ | IVar _ -> assert false
+       | VVar _ | IVar _ | HVar _ -> assert false
 
 
   (** tests if a formula is contradictory *)
@@ -913,7 +998,7 @@ module Make(Act:Act)(Prop:Prop) = struct
         let s = add_to_seq s ms in
         match LibTools.min_first ileq s.disj with
         | [] -> time_analysis f ctx s
-        | Disj (m::ms)::d ->
+        | { data = Disj (m::ms) }::d ->
            let s = { s with disj = [] } in
            (*let m = pick_atom m in*)
            (*Format.printf "case on %a\n" print m;*)
@@ -922,7 +1007,7 @@ module Make(Act:Act)(Prop:Prop) = struct
            case_analysis f ctx s (m::d) &&
              ( let m' = neg m in (** CHECK: wo do not need to decorate m' !!! *)
                Io.log_sat "case %a\n%!" print m';
-               case_analysis f ctx s (m' :: Disj ms :: d))
+               case_analysis f ctx s (m' :: hashCons (Disj ms) :: d))
         | m::_  -> Format.eprintf "%a\n%!" print m; assert false
       with
         Exit -> Pervasives.(total := !total +. f); true

@@ -108,8 +108,8 @@ let bfix cst names body index =
                             env := (name,v)::!env) names xs;
                         box_array (Array.map (fun f -> f !env) body))))
 
-let bmu = bfix (fun index x -> Mu(Inf,index,x))
-let bnu = bfix (fun index x -> Nu(Inf,index,x))
+let bmu = bfix (fun index x -> hashCons (Mu(Inf,index,x)))
+let bnu = bfix (fun index x -> hashCons (Nu(Inf,index,x)))
 
 
 let parser args =
