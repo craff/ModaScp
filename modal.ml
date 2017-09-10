@@ -354,20 +354,25 @@ module Make(Act:Act)(Prop:Prop) = struct
   (** Smart constructors *)
   let atom' a = hashCons (Atom a)
   let atom a = box (atom' a)
+  let next' m = hashCons (Next m)
+  let cAll' m = hashCons (CAll m)
+  let cExi' m = hashCons (CExi m)
+  let mAll' a m = hashCons (MAll(a,m))
+  let mExi' a m = hashCons (MExi(a,m))
 
   (** Sorting and simplifiying disjunction *)
   let rec _Disj l =
-    let rec fn acc m = match acc, m.data with
+    let rec fn (acc:modal list) m = match acc, m.data with
       | _, Conj [] -> raise Exit (* True in a disjunction *)
       | _, Disj l' -> List.fold_left fn acc l'
-      | (Next m1::acc), Next m2 -> Next(_Disj [m1;m2])::acc
-      | (CAll m1::acc), CAll m2 -> CAll(_Disj [m1;m2])::acc
-      | (CExi m1::acc), CExi m2 -> CExi(_Disj [m1;m2])::acc
-      | (MAll(a1, m1)::acc), MAll(a2,m2) when Act.compare a1 a2 = 0 ->
-         MAll(a1, (_Disj [m1;m2]))::acc
-      | (MExi(a1, m1)::acc), MExi(a2,m2) when Act.compare a1 a2 = 0 ->
-         MExi(a1, (_Disj [m1;m2]))::acc
-      | _, m -> m::acc
+      | ({ data = Next m1}::acc), Next m2 -> next'(_Disj [m1;m2])::acc
+      | ({ data = CAll m1}::acc), CAll m2 -> cAll'(_Disj [m1;m2])::acc
+      | ({ data = CExi m1}::acc), CExi m2 -> cExi'(_Disj [m1;m2])::acc
+      | ({ data = MAll(a1, m1)}::acc), MAll(a2,m2) when Act.compare a1 a2 = 0 ->
+         mAll' a1 (_Disj [m1;m2]) :: acc
+      | ({ data = MExi(a1, m1)}::acc), MExi(a2,m2) when Act.compare a1 a2 = 0 ->
+         mExi' a1 (_Disj [m1;m2]) :: acc
+      | _, _ -> m::acc
     in
     try
       let l = List.fold_left fn [] l in
