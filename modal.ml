@@ -356,11 +356,18 @@ module Make(Act:Act)(Prop:Prop) = struct
   let atom a = box (atom' a)
 
   (** Sorting and simplifiying disjunction *)
-  let _Disj (l:modal list) =
-    let rec fn acc m = match m.data with
-      | Conj [] -> raise Exit (* True in a disjunction *)
-      | Disj l' -> List.fold_left fn acc l'
-      | _ -> m::acc
+  let rec _Disj l =
+    let rec fn acc m = match acc, m.data with
+      | _, Conj [] -> raise Exit (* True in a disjunction *)
+      | _, Disj l' -> List.fold_left fn acc l'
+      | (Next m1::acc), Next m2 -> Next(_Disj [m1;m2])::acc
+      | (CAll m1::acc), CAll m2 -> CAll(_Disj [m1;m2])::acc
+      | (CExi m1::acc), CExi m2 -> CExi(_Disj [m1;m2])::acc
+      | (MAll(a1, m1)::acc), MAll(a2,m2) when Act.compare a1 a2 = 0 ->
+         MAll(a1, (_Disj [m1;m2]))::acc
+      | (MExi(a1, m1)::acc), MExi(a2,m2) when Act.compare a1 a2 = 0 ->
+         MExi(a1, (_Disj [m1;m2]))::acc
+      | _, m -> m::acc
     in
     try
       let l = List.fold_left fn [] l in
