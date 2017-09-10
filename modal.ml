@@ -38,7 +38,8 @@ module Make(Act:Act)(Prop:Prop) = struct
    and modal = {
        address: int;
        key: int;
-       data: modal'
+       data: modal';
+       keep:Obj.t list; (* to keep refs to the hashed binders *)
      }
 
    and modal' =
@@ -89,7 +90,7 @@ module Make(Act:Act)(Prop:Prop) = struct
        | c -> c
 
   module HModal = struct
-    let mkHVar n = { address = -n; key = Hashtbl.hash (`HVar, n); data = HVar n }
+    let mkHVar n = { address = -n; key = Hashtbl.hash (`HVar, n); data = HVar n; keep = [] }
 
     let canonical_vars f =
       let occurs = mbinder_occurs f in
@@ -99,23 +100,29 @@ module Make(Act:Act)(Prop:Prop) = struct
           let n = if b then (incr i; r + !i) else 0 in
           mkHVar n) occurs
 
-    let hash_mbinder f =
-      Hashtbl.hash(mbinder_occurs f,Array.map key (msubst f (canonical_vars f)))
+    let hash_mbinder ptr f =
+      let canonicals = msubst f (canonical_vars f) in
+      ptr := Obj.repr canonicals :: !ptr;
+      Hashtbl.hash(mbinder_occurs f,Array.map key canonicals)
 
-    let hash' = function
-      | HVar n      -> Hashtbl.hash (`HVar, n)
-      | VVar v      -> hash_var v
-      | Atom a      -> Hashtbl.hash (`Atom, a)
-      | Conj l      -> Hashtbl.hash (`Conj, List.map key l)
-      | Disj l      -> Hashtbl.hash (`Disj, List.map key l)
-      | MAll (a, m) -> Hashtbl.hash (`MAll, a, key m)
-      | MExi (a, m) -> Hashtbl.hash (`MExi, a, key m)
-      | CAll m      -> Hashtbl.hash (`CAll, key m)
-      | CExi m      -> Hashtbl.hash (`CExi, key m)
-      | Next m      -> Hashtbl.hash (`Next, key m)
-      | Mu(t,i,f)   -> Hashtbl.hash (`Mu,t,i,hash_mbinder f)
-      | Nu(t,i,f)   -> Hashtbl.hash (`Nu,t,i,hash_mbinder f)
-      | IVar(n,m)   -> Hashtbl.hash (`IVar,n,m)
+    let hash' data =
+      let ptr = ref [] in
+      let h = match data with
+        | HVar n      -> Hashtbl.hash (`HVar, n)
+        | VVar v      -> hash_var v
+        | Atom a      -> Hashtbl.hash (`Atom, a)
+        | Conj l      -> Hashtbl.hash (`Conj, List.map key l)
+        | Disj l      -> Hashtbl.hash (`Disj, List.map key l)
+        | MAll (a, m) -> Hashtbl.hash (`MAll, a, key m)
+        | MExi (a, m) -> Hashtbl.hash (`MExi, a, key m)
+        | CAll m      -> Hashtbl.hash (`CAll, key m)
+        | CExi m      -> Hashtbl.hash (`CExi, key m)
+        | Next m      -> Hashtbl.hash (`Next, key m)
+        | Mu(t,i,f)   -> Hashtbl.hash (`Mu,t,i,hash_mbinder ptr f)
+        | Nu(t,i,f)   -> Hashtbl.hash (`Nu,t,i,hash_mbinder ptr f)
+        | IVar(n,m)   -> Hashtbl.hash (`IVar,n,m)
+      in
+      (h, !ptr)
 
     let equal_mbinder f f' =
       mbinder_rank f = mbinder_rank f' &&
@@ -160,7 +167,7 @@ module Make(Act:Act)(Prop:Prop) = struct
     let hash = hash
   end
 
-  module WModal = Hashtbl.Make(HModal)
+  module WModal = Weak.Make(HModal)
   (** A total order on formulas, This order indirectly select the next
       litteral in the solver procedure, so changing it is not at all
       neutral *)
@@ -174,9 +181,9 @@ module Make(Act:Act)(Prop:Prop) = struct
     c'
 
   let rec hashCons data =
-    let key = HModal.hash' data in
+    let key, keep = HModal.hash' data in
     let address = get_addr () in
-    let data' = { address; key; data } in
+    let data' = { address; key; data; keep } in
     (*Format.eprintf "Hashing: %a %d %d ⇒ " print data' key address;*)
     try
       let res = WModal.find hashtbl data' in
@@ -184,7 +191,7 @@ module Make(Act:Act)(Prop:Prop) = struct
       res
     with Not_found ->
       (*Format.eprintf "Not found\n%!";*)
-      WModal.add hashtbl data' data';
+      WModal.add hashtbl data';
       data'
 
   (** vvar as a function, for Bindlib *)
