@@ -535,6 +535,51 @@ module Make(Act:Act)(Prop:Prop) = struct
     fn m;
     Array.of_list (List.rev !res)
 
+  let collect_initial : modal -> int array * int option array = fun m ->
+    let res = ref [] in
+    let rec fn m = match m.data with
+      | Mu(t,n,b) ->
+         res := m.address :: !res;
+         let (names, ms) = unmbind vvar b in
+         Array.iter fn ms
+      | Nu(t,n,b) ->
+         let (names, ms) = unmbind vvar b in
+         Array.iter fn ms
+      | Conj l -> List.iter fn l
+      | Disj l -> List.iter fn l
+      | MAll (a,m) -> fn m
+      | MExi (a,m) -> fn m
+      | CAll (m) -> fn m
+      | CExi (m) -> fn m
+      | Next (m) -> fn m
+      | Atom b -> ()
+      | VVar m -> ()
+      | IVar _ -> assert false
+      | HVar _ -> assert false
+    in
+    fn m;
+    let vars = Array.of_list (List.rev !res) in
+    let rels = Array.map (fun _ -> None) vars in
+    (vars, rels)
+
+  let flatten_rels : int array -> int option array -> int array =
+    fun vars rels ->
+      let vars = Array.copy vars in
+      let len = Array.length vars in
+      assert (Array.length rels = len);
+      let sler = Array.make len None in
+      let new_rel = Array.make len None in
+      Array.iteri (fun i o ->
+          match o with
+          | None -> ()
+          | Some j ->
+             match sler.(j) with
+             | None -> sler.(j) <- Some i; new_rel.(i) <- Some j
+             | Some i' -> vars.(i) <- vars.(i'))
+                  rels;
+      vars
+
+
   type litteral =
     | LAtom of Prop.t
     | LPos of litteral'
@@ -547,6 +592,26 @@ module Make(Act:Act)(Prop:Prop) = struct
      | LCAll of modal
      | LCExi of modal
      | LNext of modal
+
+  let negLit = function
+    | LAtom a -> LAtom (Prop.neg a)
+    | LPos l -> LNeg l
+    | LNeg l -> LPos l
+
+  let implyLit a1 a2 =
+    let f l1 l2 = match (l1, l2) with
+      | (LConj m1, LConj m2) -> m1.address = m2.address
+      | (LCAll m1, LCAll m2) -> m1.address = m2.address
+      | (LCExi m1, LCExi m2) -> m1.address = m2.address
+      | (LNext m1, LNext m2) -> m1.address = m2.address
+      | (LMAll (a1,m1), LMAll(a2,m2)) -> Act.compare a1 a2 = 0 && m1.address = m2.address
+      | (LMExi (a1,m1), LMExi(a2,m2)) -> Act.compare a1 a2 = 0 && m1.address = m2.address
+      | _ -> false
+    in
+    match (a1, a2) with
+    | (LAtom a1, LAtom a2) -> Prop.imply a1 a2
+    | LPos l1, LPos l2 -> f l1 l2
+    | LNeg l1, LNeg l2 -> f l1 l2
 
   type clause = litteral list
 
@@ -683,64 +748,6 @@ module Make(Act:Act)(Prop:Prop) = struct
     let um = addToMap m in
     (tbl, um)
 
-  (** decorate: replace infinite time in mu with fresh variables *)
-  let undecorate =
-    (** tries a little sharing ...
-        It seems to give a significative gain in some cases.  One
-        should do this more systematically, in particular for mu with
-        bound variables (bounded higher in the formula *)
-    let adone = ref [] in
-    let rec fn m =
-      try let (_, r) = List.find (fun (m',_) -> ileq m m' = 0) !adone in r
-      with Not_found ->
-        let res =
-          match m.data with
-          | Mu(t,n,b) ->
-             mu n (mbinder_arity b)
-                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
-          | Nu(t,n,b) ->
-             nu n (mbinder_arity b)
-                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
-          | Conj l -> conj (List.map fn l)
-          | Disj l -> disj (List.map fn l)
-          | MAll (a,m) -> mAll a (fn m)
-          | MExi (a,m) -> mExi a (fn m)
-          | CAll (m) -> cAll (fn m)
-          | CExi (m) -> cExi (fn m)
-          | Next (m) -> next (fn m)
-          | Atom b -> atom b
-          | VVar m -> box_of_var m
-          | IVar _ -> assert false
-          | HVar _ -> assert false
-        in
-        adone := (m,res)::!adone;
-        res
-    in
-    fun m -> unbox (fn m)
-
-  let pred m = function
-    | Inf      -> Var(index (undecorate m),0)
-    | Var(a,p) -> Var(a,p+1)
-
-  let pred' m = function
-    | Inf      -> Inf
-    | Var(a,p) -> Var(a,p+1)
-
-  (** time comparison, return value expected by the scp *)
-  let cmp_time t1 t2 =
-    let open Sct in
-    let rec cmp_time t1 t2 =
-        if t1 == t2 then Zero else
-        match (t1, t2) with
-        | (Inf       , Inf       )                         -> assert false
-        | (_         , Inf       )                         -> Min1
-        | (Var(x1,p1), Var(x2,p2)) when x1 = x2 && p1 > p2 -> Min1
-        | (_         , _         )                         -> Infi
-    in
-    let res = cmp_time t1 t2 in
-    Io.log_cmp "cmp_time %a %a = %a\n" tprint t1 tprint t2 cprint res;
-    res
-
   (** negation *)
   let neg : modal -> modal = fun m ->
     let rec fn m = match m.data with
@@ -779,122 +786,6 @@ module Make(Act:Act)(Prop:Prop) = struct
   let eventually m = mu0 (fun x -> disj2 m (next x))
   let until f g = mu0 (fun x -> disj2 (conj2 f (next x)) g)
   let before f g = nu0 (fun x -> disj2 (conj2 f (next x)) g) (* CHECK ? *)
-
-  (** decorate: replace infinite time in mu with fresh variables *)
-  let decorate =
-    (** tries a little sharing ...
-        It seems to give a significative gain in some cases.  One
-        should do this more systematically, in particular for mu with
-        bound variables (bounded higher in the formula *)
-    let adone = ref [] in
-    let rec fn m = (* FIXME: optimise *)
-      try let (_, r) = List.find (fun (m',_) -> ileq m m' = 0) !adone in r
-      with Not_found ->
-        let res =
-          match m.data with
-          | Mu(t,n,b) ->
-             let t = if t = Inf then pred m t else t in
-             mu ~time:t n (mbinder_arity b)
-                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
-          | Nu(t,n,b) ->
-             nu ~time:t n (mbinder_arity b)
-                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
-          | Conj l -> conj (List.map fn l)
-          | Disj l -> disj (List.map fn l)
-          | MAll (a,m) -> mAll a (fn m)
-          | MExi (a,m) -> mExi a (fn m)
-          | CAll (m) -> cAll (fn m)
-          | CExi (m) -> cExi (fn m)
-          | Next (m) -> next (fn m)
-          | Atom b -> atom b
-          | VVar m -> box_of_var m
-          | IVar _ -> assert false
-          | HVar _ -> assert false
-        in
-        adone := (m,res)::!adone;
-        res
-    in
-    fun m -> unbox (fn m)
-
-  (** Comparison of formulas, means in some sence subtyping
-      or trivial implication *)
-  let leq m1 m2 =
-    let rec fn m1 m2 =
-      if m1 == m2 then true else
-      match m1.data, m2.data with
-      | Nu(t1,i1,f1), Nu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
-         cmp_time t2 t1 <= Zero &&
-           let (v,m) = unmbind vvar f1 in
-           LibTools.array_for_all2 fn m (msubst f2 (Array.map free_of v))
-      | Mu(t1,i1,f1), Mu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
-         cmp_time t1 t2 <= Zero &&
-           let (v,m) = unmbind vvar f1 in
-           LibTools.array_for_all2 fn m (msubst f2 (Array.map free_of v))
-      | Disj(l1), Disj(l2)
-      | Conj(l1), Conj(l2) when List.length l1 = List.length l2 ->
-         List.for_all2 fn l1 l2
-      | MAll(a1,m1), MAll(a2,m2)
-      | MExi(a1,m1), MExi(a2,m2) when Act.compare a1 a2 = 0 ->
-         fn m1 m2
-      | CAll(m1), CAll(m2)
-      | CExi(m1), CExi(m2)
-      | Next(m1), Next(m2) -> fn m1 m2
-      | Atom(a1), Atom(a2) -> Prop.imply a1 a2
-      | VVar(v1), VVar(v2) -> eq_vars v1 v2
-      | _ -> false
-    in
-    fn m1 m2
-
-  (** A structure to store all assumption grouped by head constructor *)
-   type seq =
-     { atom : Prop.t list
-     ; mAll : (Act.t * modal) list
-     ; mExi : (Act.t * modal) list
-     ; cAll : modal list
-     ; cExi : modal list
-     ; next : modal list
-     ; disj : modal list
-     ; blnu : modal list  (** these are nu decorate with time which are
-                              not known to be positive and can not be unfolded *)
-     ; posi : time list   (** the positive time *)
-     }
-
-  (** Printing for sequent *)
-  let seq_to_modal acc s =
-    let acc = List.fold_left (fun acc a -> atom' a :: acc) acc s.atom in
-    let acc = List.fold_left (fun acc (a,m) -> mAll' a m :: acc) acc s.mAll in
-    let acc = List.fold_left (fun acc (a,m) -> mExi' a m :: acc) acc s.mExi in
-    let acc = List.fold_left (fun acc m -> cAll' m :: acc) acc s.cAll in
-    let acc = List.fold_left (fun acc m -> cExi' m :: acc) acc s.cExi in
-    let acc = List.fold_left (fun acc m -> next' m :: acc) acc s.next in
-    let acc = List.fold_left (fun acc m -> m :: acc) acc s.disj in
-    let acc = List.fold_left (fun acc m -> m :: acc) acc s.blnu in
-    acc
-
-  let print_seq : Format.formatter -> seq * modal list -> unit = fun ff (s, ms) ->
-    lprint ",\n  " print ff ms;
-    Format.fprintf ff " ||\n  ";
-    lprint ",\n  " print ff (seq_to_modal [] s)
-
-  let empty_seq = { atom = []; mExi = []; mAll = []
-                  ; cAll = []; cExi = []; next = []
-                  ; disj = []; blnu = []; posi = []
-                  }
-
-  (** Debruijn representation, used as keys in the table below,
-      do not contain time variable *)
-  type dmodal =
-    | DAtom of Prop.t
-    | DConj of dmodal list
-    | DDisj of dmodal list
-    | DMAll of Act.t * dmodal
-    | DMExi of Act.t * dmodal
-    | DCAll of dmodal
-    | DCExi of dmodal
-    | DNext of dmodal
-    | DMu   of int * dmodal array
-    | DNu   of int * dmodal array
-    | DIVar of int * int
 
   (** A tree structure to store induction hypothesese, these is a map
       associating to the induction hypothesis (a sorted list of
@@ -966,117 +857,6 @@ module Make(Act:Act)(Prop:Prop) = struct
     let names = Array.mapi (fun i _ -> "x" ^ string_of_int i) indexes in
     let index = create_symbol ctx.cgraph "I" names in
     (index, indexes)
-
-  let has_no_nu_deco m =
-    let rec fn m = match m.data with
-      | Nu(t1,i1,f1) ->
-         t1 = Inf &&
-           let (v,m) = unmbind vvar f1 in
-           Array.for_all fn m
-      | Mu(t1,i1,f1) ->
-         let (v,m) = unmbind vvar f1 in
-         Array.for_all fn m
-      | Disj(l1)
-      | Conj(l1) ->
-         List.for_all fn l1
-      | MAll(_,m1)
-      | MExi(_,m1)
-      | CAll(m1)
-      | CExi(m1)
-      | Next(m1) ->
-         fn m1
-      | VVar _ | Atom _ -> true
-      | HVar _ -> assert false
-      | IVar _ -> assert false
-    in
-    fn m
-
-  (** Conversion to Debruijn *) (* FIXME: can optimise ? *)
-  let debruijn : modal -> dmodal = fun m ->
-    let iVar depth n = hashCons(IVar(depth,n)) in
-    let rec gn depth m =
-      let fn = gn depth in
-      match m.data with
-      | Mu(t,n,b) ->
-         let vars = Array.init (mbinder_arity b) (fun n -> iVar depth n) in
-         DMu(n, Array.map (gn (depth + 1)) (msubst b vars))
-      | Nu(t,n,b) ->
-         let vars = Array.init (mbinder_arity b) (fun n -> iVar depth n) in
-         DNu(n, Array.map (gn (depth + 1)) (msubst b vars))
-      | Conj l -> DConj (List.map fn l)
-      | Disj l -> DDisj (List.map fn l)
-      | MAll (a,m) -> DMAll(a, fn m)
-      | MExi (a,m) -> DMExi(a, fn m)
-      | CAll (m) -> DCAll(fn m)
-      | CExi (m) -> DCExi(fn m)
-      | Next (m) -> DNext(fn m)
-      | Atom b -> DAtom b
-      | IVar(d,n) -> DIVar(depth-d,n)
-      | HVar m -> assert false
-      | VVar m -> assert false
-    in
-    gn 0 m
-
-  (** Try to apply an induction hypothesis *)
-  let patmatch (hyps:(index * modal list) modal_tree) ms =
-    let open Timed in
-    let res = ref [] in
-    let memo = ref [] in
-    let ms = List.map (fun m -> (m, debruijn m)) ms in
-    let rec fn m1 m2 =
-      match m1.data, m2.data with
-      | Nu(t1,i1,f1), Nu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
-         if t1 != Inf && not (List.exists (fun t -> compare_time t1 t = 0) !memo)
-         then (res := t2 :: !res; memo := t1 :: !memo);
-         let (v,m) = unmbind vvar f1 in
-         LibTools.array_for_all2 fn m (msubst f2 (Array.map free_of v))
-      | Mu(t1,i1,f1), Mu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
-         if t1 != Inf && not (List.exists (fun t -> compare_time t1 t = 0) !memo)
-         then (res := t2 :: !res; memo := t1 :: !memo);
-         let (v,m) = unmbind vvar f1 in
-         LibTools.array_for_all2 fn m (msubst f2 (Array.map free_of v))
-      | Disj(l1), Disj(l2)
-      | Conj(l1), Conj(l2) when List.length l1 = List.length l2 ->
-         List.for_all2 fn l1 l2
-      | MAll(a1,m1), MAll(a2,m2)
-      | MExi(a1,m1), MExi(a2,m2) when Act.compare a1 a2 = 0 ->
-         fn m1 m2
-      | CAll(m1), CAll(m2)
-      | CExi(m1), CExi(m2)
-      | Next(m1), Next(m2) -> fn m1 m2
-      | Atom(a1), Atom(a2) -> Prop.imply a2 a1
-      | VVar(v1), VVar(v2) -> eq_vars v1 v2
-      | _ -> false
-    in
-    (** searching in the table *)
-    let rec search ms hyps =
-      match ms with
-      | [] ->
-         begin
-           match !(hyps.leaf) with
-           | Some d -> d
-           | None -> raise Not_found
-         end
-      | (m,k)::ms ->
-         let tbl = hyps.next in
-         let l = TimedHashtbl.find tbl k in
-         let rec gn = function
-           | [] -> raise Not_found
-           | (m',next)::rest ->
-              let time = Time.save () in
-              if Timed.pure_test (fn m') m then
-                begin
-                  try
-                    search ms next
-                  with
-                    Not_found ->
-                      Time.rollback time; gn rest
-                end
-              else gn rest
-         in gn l
-    in
-    let hyp = Chrono.add_time chr_search (search ms) hyps in
-    (hyp, Array.of_list (List.rev !res))
 
   (** adds an induction hypothesis to the dedicated table *)
   let rec add_indhyp ms0 ms d adone =
@@ -1289,36 +1069,73 @@ module Make(Act:Act)(Prop:Prop) = struct
        | VVar _ | IVar _ | HVar _ -> assert false
 
 
+  exception Contradiction
+
+  let len_one = function
+      [] -> raise Contradiction
+    | [_] -> true
+    | _ -> false
+
   (** tests if a formula is contradictory *)
   let solver : modal -> bool = fun m ->
+    Format.printf "original: %a\n\n%!" print m;
+    let (tbl, m) = buildMap m in
+    Format.printf "uniform:  %a\n\n%!" print m;
+    ModalTbl.iter (fun m r -> Format.printf "%a\n\n" printModalInfo (m, r)) tbl;
+
     (** a reference to compute the progress in the problem *)
     let total = ref 0.0 in
 
     (** this function perform case analysis on formula appearing in a disjunction *)
-    let rec case_analysis : float -> context -> seq -> modal list -> bool
-      = fun f ctx s ms ->
+    let rec case_analysis : float -> context -> seq -> clauses -> unit =
       Io.log_prg "\r%f %e %d    %!" !total f !(ctx.cgraph.next_index);
-      Io.log_sat "gn %a |-\n%!" print_seq (s, ms);
-      try
-        let s = add_to_seq s ms in
-        match LibTools.min_first ileq s.disj with
-        | [] -> time_analysis f ctx s
-        | { data = Disj (m::ms) }::d ->
-           let s = { s with disj = [] } in
-           (*let m = pick_atom m in*)
-           (*Format.printf "case on %a\n" print m;*)
+      fun f ctx seq clauses ->
+        let rec unit_propagation seq clauses =
+          let units, clauses = List.patitiion len_one clauses in
+          if units = [] then (seq, clauses) else
+          let seq = units @ seq in
+          let clauses =
+            List.filter (fun cl ->
+                List.exists (fun l2 ->
+                    List.exists (fun l1 -> implyLit l1 l2) units) cl) clauses in
+          let nunits = List.map negList units in
+          let clauses =
+            List.map (fun cl ->
+                List.filter (fun l2 ->
+                        List.exists (fun l1 -> implyLit l1 l2) nunits) cl) clauses in
+          unit_propagation seq clauses
+        in
+        let seq, clausess = unit_propagation seq clauses in
+        match clauses with
+        | [] -> time_analysis float context clauses
+        | (l::_)::_ ->
            let f = f /. 2.0 in
-           Io.log_sat "case %a\n%!" print m;
-           case_analysis f ctx s (m::d) &&
-             ( let m' = neg m in (** CHECK: wo do not need to decorate m' !!! *)
-               Io.log_sat "case %a\n%!" print m';
-               case_analysis f ctx s (m' :: hashCons (Disj ms) :: d))
-        | m::_  -> Format.eprintf "%a\n%!" print m; assert false
-      with
-        Exit -> Pervasives.(total := !total +. f); true
+           try
+             Io.log_sat "case %a\n%!" print_litteral l;
+             case_analysis f ctx (l::seq) clauses
+           with Contradiction ->
+             Pervasives.(total := !total +. f);
+             let l = negLit l in
+             Io.log_sat "case %a\n%!" print_litteral l;
+             case_analysis f ctx (l::seq) clauses
+        | _  -> Format.eprintf "%a\n%!" print m; assert false
 
     (** when case analysis is finished, we look what happens in the next state *)
     and time_analysis : float -> context -> seq -> bool = fun f ctx s ->
+      let nexts = ref [] in
+      let calls = ref [] in
+      let cexis = ref [] in
+      let malls = ref [] in
+      let mexis = ref [] in
+      List.iter (function
+                 | LAtom _ | LNeg _ | LPos (Conj _) -> ()
+                 | LPos (LNext m) -> nexts := m :: ! nexts
+                 | LPos (LCAll m) -> calls := m :: ! calls
+                 | LPos (LCExi m) -> cexis := m :: ! cexis
+                 | LPos (LMAll (a,m)) -> malls := (a,m) :: ! malls
+                 | LPos (LMExi (a,m)) -> mexis := (a,m) :: ! mexis) seq;
+
+
       let s0 = { empty_seq with posi = s.posi } in
       (** Common code for all case analysis *)
       let rec next_time : float -> context -> modal list -> bool = fun f ctx ms ->
@@ -1357,7 +1174,9 @@ module Make(Act:Act)(Prop:Prop) = struct
     in
 
     let ctx = empty_ctx () in
-    let run () = Chrono.add_time chr_solve (case_analysis 100.0 ctx empty_seq) [m] in
+    let params = collect_initial m in
+    let clauses = ModalTbl.find tbl m in
+    let run () = Chrono.add_time chr_solve (case_analysis 100.0 ctx empty_seq) (clauses,params) in
     let time = ref 0.0 in
     let rt t = time := t in
     let res = Chrono.time rt run () in
@@ -1369,14 +1188,9 @@ module Make(Act:Act)(Prop:Prop) = struct
   let _ = Printexc.record_backtrace true
 
   let prove m0 =
-    Format.printf "original: %a\n\n%!" print m0;
-    let (tbl, m) = buildMap m0 in
-    Format.printf "uniform:  %a\n\n%!" print m;
-    ModalTbl.iter (fun m r -> Format.printf "%a\n\n" printModalInfo (m, r)) tbl;
     try
       Io.log_ver "PROVING: %a\n%!" print m0;
-      let m = (*decorate*) (neg m0) in
-      let res = solver m in
+      let res = solver (neg m0) in
       Format.printf (if res then "valid\n%!" else "invalid\n%!");
       res
     with
@@ -1387,8 +1201,7 @@ module Make(Act:Act)(Prop:Prop) = struct
   let sat m0 =
     try
       Io.log_ver "CHECKING SAT: %a\n%!" print m0;
-      let m = (*decorate*) m0 in
-      let res = solver m in
+      let res = solver m0 in
       Format.printf (if res then "unsatifiable\n%!" else "satifiable\n%!");
       res
     with
