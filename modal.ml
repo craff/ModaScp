@@ -475,6 +475,214 @@ module Make(Act:Act)(Prop:Prop) = struct
     in
     fn m
 
+  (** Give distinct an consecutive number to every mu *)
+  let uniformise : modal -> int * modal = fun m ->
+    let count = ref 0 in
+    let get () =
+      let c = !count in
+      count := c + 1;
+      c
+    in
+    let rec fn m = match m.data with
+      | Mu(t,n,b) ->
+         mu' ~time:(Var(get(),0)) n (mbinder_arity b)
+            (fun xs -> Array.map fn (msubst b (Array.map free_of xs)))
+      | Nu(t,n,b) ->
+         nu' n (mbinder_arity b)
+            (fun xs -> Array.map fn (msubst b (Array.map free_of xs)))
+      | Conj l -> conj (List.map fn l)
+      | Disj l -> disj (List.map fn l)
+      | MAll (a,m) -> mAll a (fn m)
+      | MExi (a,m) -> mExi a (fn m)
+      | CAll (m) -> cAll (fn m)
+      | CExi (m) -> cExi (fn m)
+      | Next (m) -> next (fn m)
+      | Atom b -> atom b
+      | VVar m -> box_of_var m
+      | IVar _ -> assert false
+      | HVar _ -> assert false
+    in
+    (!count, unbox (fn m))
+  (** Give distinct an consecutive number to every mu *)
+
+  let collect_changes : modal -> (int * bool) array = fun m ->
+    let res = ref [] in
+    let rec fn m = match m.data with
+      | Mu(t,n,b) ->
+         begin
+           match t with
+           | Var(m,0) -> res := (m,false) :: !res
+           | Var(m,1) -> res := (m,true)  :: !res
+           | _ -> assert false
+         end;
+         let (names, ms) = unmbind vvar b in
+         Array.iter fn ms
+      | Nu(t,n,b) ->
+         let (names, ms) = unmbind vvar b in
+         Array.iter fn ms
+      | Conj l -> List.iter fn l
+      | Disj l -> List.iter fn l
+      | MAll (a,m) -> fn m
+      | MExi (a,m) -> fn m
+      | CAll (m) -> fn m
+      | CExi (m) -> fn m
+      | Next (m) -> fn m
+      | Atom b -> ()
+      | VVar m -> ()
+      | IVar _ -> assert false
+      | HVar _ -> assert false
+    in
+    fn m;
+    Array.of_list (List.rev !res)
+
+  type litteral =
+    | LAtom of Prop.t
+    | LPos of litteral'
+    | LNeg of litteral'
+
+   and litteral' =
+     | LConj of modal
+     | LMAll of (Act.t * modal)
+     | LMExi of (Act.t * modal)
+     | LCAll of modal
+     | LCExi of modal
+     | LNext of modal
+
+  type clause = litteral list
+
+  type clauses = clause list
+
+  module HashModal = struct
+    type t = modal
+    let hash m1 = m1.key
+    let equal m1 m2 = m1.address = m2.address
+  end
+
+  module ModalTbl = Hashtbl.Make(HashModal)
+
+  let pred0 = function
+    | Inf -> assert false
+    | Var(n,p) -> Var(n,p+1)
+
+  type modalInfo = { arity : int
+                   ; diffs : (modal * (int * bool) array) ModalTbl.t
+                   ; mutable clauses : clauses
+                   }
+
+  let print_litteral' ff l = match l with
+    | LConj m -> Format.fprintf ff "%d " m.address
+    | LMAll(a,m) -> Format.fprintf ff "[%s]%d " (Act.to_string a) m.address
+    | LMExi(a,m) -> Format.fprintf ff "⟨%s⟩%d " (Act.to_string a) m.address
+    | LCAll m -> Format.fprintf ff "[]%d " m.address
+    | LCExi m -> Format.fprintf ff "⟨⟩%d " m.address
+    | LNext m -> Format.fprintf ff "O%d" m.address
+
+  let print_litteral ff l = match l with
+    | LAtom(a) -> Format.fprintf ff "%s " (Prop.to_string a)
+    | LPos(m)  -> Format.fprintf ff "+%a " print_litteral' m
+    | LNeg(m)  -> Format.fprintf ff "-%a " print_litteral' m
+
+
+  let print_clause ff l = List.iter (print_litteral ff) l
+
+  let print_diff ff l =
+    Array.iter (fun (n,b) ->
+        if b then Format.fprintf ff "%d-1 " n
+        else Format.fprintf ff "%d " n) l
+
+  let printModalInfo ff (m, info) =
+    Format.fprintf ff "F(%d) = %a\n" m.address print m;
+    Format.fprintf ff "A(%d) = %d\n" m.address info.arity;
+    Format.fprintf ff "C(%d) =\n" m.address;
+    List.iter (Format.fprintf ff "  %a\n" print_clause) info.clauses;
+    Format.fprintf ff "D(%d) =\n" m.address;
+    ModalTbl.iter
+      (fun m (m', diff) ->
+        Format.fprintf ff "  %d -> %d(%a)\n" m.address m'.address print_diff diff)
+      info.diffs
+
+  let rec buildMap : modal -> modalInfo ModalTbl.t * modal = fun m ->
+    let tbl = ModalTbl.create 101 in
+    let rec addToMap m0 =
+      let diffs = ModalTbl.create 17 in
+      let rec clauses : modal option -> clauses -> modal -> clauses = fun parent cls m ->
+        Format.printf "clauses %a\n%!" print m;
+        match m.data with
+        | Mu(t,i,f) ->
+           let t = pred0 t in
+           let v = Array.init (mbinder_arity f) (fun i -> hashCons(Mu(t,i,f))) in
+           let m = (msubst f v).(i) in
+           clauses parent cls m
+        | Nu(t,i,f) ->
+           assert(t=Inf);
+           let v = Array.init (mbinder_arity f) (fun i -> hashCons(Nu(t,i,f))) in
+           let m = (msubst f v).(i) in
+           clauses parent cls m
+        | Conj l -> List.fold_left (clauses parent) cls l
+        | Disj l ->
+           let cls, l = List.fold_left mk_litteral (cls,[]) l in
+           let l = match parent with
+             | None -> l
+             | Some ({ data = Conj _ } as p) -> LNeg (LConj p) :: l
+             | _ -> assert false
+           in
+           l::cls
+        | _ ->
+           clauses parent cls (hashCons(Disj[m]))
+
+      and mk_litteral = fun (cls,acc) m ->
+        match m.data with
+        | Mu(t,i,f) ->
+           let t = pred0 t in
+           let v = Array.init (mbinder_arity f) (fun i -> hashCons(Mu(t,i,f))) in
+           let m = (msubst f v).(i) in
+           mk_litteral (cls,acc) m
+        | Nu(t,i,f) ->
+           assert(t=Inf);
+           let v = Array.init (mbinder_arity f) (fun i -> hashCons(Nu(t,i,f))) in
+           let m = (msubst f v).(i) in
+           mk_litteral (cls,acc) m
+        | Conj _ ->
+           let cls = clauses (Some m) cls  m in
+           (cls, LPos (LConj m) :: acc)
+        | Disj l ->
+           List.fold_left mk_litteral (cls,acc) l
+        | Atom a ->
+           (cls, LAtom a :: acc)
+        | m0 ->
+           let diff = collect_changes m in
+           let f = function
+             | Next m -> (LNext m, m, addToMap m)
+             | CAll m -> (LCAll m, m, addToMap m)
+             | CExi m -> (LCExi m, m, addToMap m)
+             | MAll(a,m) -> (LMAll (a,m), m, addToMap m)
+             | MExi(a,m) -> (LMExi (a,m), m, addToMap m)
+             | _ -> assert false
+           in
+           let lit,m,m' = f m0 in
+           Format.printf "Add diff %d %d\n" m.address m'.address;
+           ModalTbl.add diffs m (m', diff);
+           (cls, LPos lit :: acc)
+      in
+
+      Format.printf "addToMap %a\n%!" print m0;
+      let (arity, um) = uniformise m0 in
+      Format.printf "addToMap %a\n%!" print um;
+      if not (ModalTbl.mem tbl um) then
+        begin
+          let r = { arity; diffs; clauses = [] } in
+          ModalTbl.add tbl um r;
+          Format.printf "Not found %d (%d)\n%!" um.address (ModalTbl.length tbl);
+          r.clauses <- clauses None [] um;
+        end
+      else
+        Format.printf "Found %d (%d)\n%!" um.address (ModalTbl.length tbl);
+      um
+    in
+
+    let um = addToMap m in
+    (tbl, um)
+
   (** decorate: replace infinite time in mu with fresh variables *)
   let undecorate =
     (** tries a little sharing ...
@@ -1161,6 +1369,10 @@ module Make(Act:Act)(Prop:Prop) = struct
   let _ = Printexc.record_backtrace true
 
   let prove m0 =
+    Format.printf "original: %a\n\n%!" print m0;
+    let (tbl, m) = buildMap m0 in
+    Format.printf "uniform:  %a\n\n%!" print m;
+    ModalTbl.iter (fun m r -> Format.printf "%a\n\n" printModalInfo (m, r)) tbl;
     try
       Io.log_ver "PROVING: %a\n%!" print m0;
       let m = (*decorate*) (neg m0) in
