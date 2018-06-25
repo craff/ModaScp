@@ -116,9 +116,9 @@ module Make(Act:Act)(Prop:Prop) = struct
               begin
                 match compare (mbinder_arity f1) (mbinder_arity f2) with
                 | 0 ->
-                   let (v,m) = unmbind vvar f1 in
+                   let (v,m) = unmbind f1 in
                    begin
-                     match ileq m.(i1) (msubst f2 (Array.map free_of v)).(i2) with
+                     match ileq m.(i1) (msubst f2 (Array.map vvar v)).(i2) with
                      | 0 -> compare_time t1 t2
                      | c -> c
                    end
@@ -235,27 +235,26 @@ module Make(Act:Act)(Prop:Prop) = struct
   let mu ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
     box_apply (fun x -> Mu(time,idx,x))
-              (mbind vvar names
-                      (fun xs -> box_array (fn xs)))
+        (let vs = new_mvar vvar names in
+         bind_mvar vs (box_array (fn (Array.map box_var vs))))
 
   let mu' ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
     box_apply (fun x -> Mu(time,idx,x))
-              (mvbind vvar names
-                      (fun xs -> box_array (fn xs)))
+              (let vs = new_mvar vvar names in
+               bind_mvar vs (box_array (fn (Array.map box_var vs))))
 
   let nu ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
     box_apply (fun x -> Nu(time,idx,x))
-              (mbind vvar names
-                      (fun xs -> box_array (fn xs)))
+              (let vs = new_mvar vvar names in
+               bind_mvar vs (box_array (fn (Array.map box_var vs))))
 
   let nu' ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
     box_apply (fun x -> Nu(time,idx,x))
-              (mvbind vvar names
-                      (fun xs -> box_array (fn xs)))
-
+              (let vs = new_mvar vvar names in
+               bind_mvar vs (box_array (fn (Array.map box_var vs))))
   (** unary mu and nu *)
   let mu0 ?(time=Inf) fn =
     mu ~time 0 1 (fun x -> [| fn x.(0) |])
@@ -264,14 +263,14 @@ module Make(Act:Act)(Prop:Prop) = struct
     nu ~time 0 1 (fun x -> [| fn x.(0) |])
 
   (** lifting function *)
-  let lift : modal -> modal bindbox = fun m ->
+  let lift : modal -> modal box = fun m ->
     let rec fn = function
       | Mu(t,n,b) ->
          mu' ~time:t n (mbinder_arity b)
-            (fun xs -> Array.map fn (msubst b (Array.map free_of xs)))
+            (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
       | Nu(t,n,b) ->
          nu' ~time:t n (mbinder_arity b)
-            (fun xs -> Array.map fn (msubst b (Array.map free_of xs)))
+            (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
       | Conj l -> conj (List.map fn l)
       | Disj l -> disj (List.map fn l)
       | MAll (a,m) -> mAll a (fn m)
@@ -280,47 +279,13 @@ module Make(Act:Act)(Prop:Prop) = struct
       | CExi (m) -> cExi (fn m)
       | Next (m) -> next (fn m)
       | Atom b -> atom b
-      | VVar m -> box_of_var m
+      | VVar m -> box_var m
       | IVar _ -> assert false
     in
     fn m
 
-  (** decorate: replace infinite time in mu with fresh variables *)
-  let undecorate =
-    (** tries a little sharing ...
-        It seems to give a significative gain in some cases.  One
-        should do this more systematically, in particular for mu with
-        bound variables (bounded higher in the formula *)
-    let adone = ref [] in
-    let rec fn m =
-      try let (_, r) = List.find (fun (m',_) -> ileq m m' = 0) !adone in r
-      with Not_found ->
-        let res =
-          match m with
-          | Mu(t,n,b) ->
-             mu n (mbinder_arity b)
-                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
-          | Nu(t,n,b) ->
-             nu n (mbinder_arity b)
-                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
-          | Conj l -> conj (List.map fn l)
-          | Disj l -> disj (List.map fn l)
-          | MAll (a,m) -> mAll a (fn m)
-          | MExi (a,m) -> mExi a (fn m)
-          | CAll (m) -> cAll (fn m)
-          | CExi (m) -> cExi (fn m)
-          | Next (m) -> next (fn m)
-          | Atom b -> atom b
-          | VVar m -> box_of_var m
-          | IVar _ -> assert false
-        in
-        adone := (m,res)::!adone;
-        res
-    in
-    fun m -> unbox (fn m)
-
   let pred m = function
-    | Inf      -> Var(index (undecorate m),0)
+    | Inf      -> Var(index m,0)
     | Var(a,p) -> Var(a,p+1)
 
   let pred' m = function
@@ -357,11 +322,11 @@ module Make(Act:Act)(Prop:Prop) = struct
     | CExi(m)   -> Format.fprintf ff "⟨⟩%a" print m
     | Next(m)   -> Format.fprintf ff "O%a" print m
     | Mu(t,n,b) ->
-       let (names, ms) = unmbind vvar b in
+       let (names, ms) = unmbind b in
        Format.fprintf ff "μ(%a)_%d%a.(%a)" (aprint ", " vprint)
                       names n tprint t (aprint ", " print) ms
     | Nu(t,n,b) ->
-       let (names, ms) = unmbind vvar b in
+       let (names, ms) = unmbind b in
        Format.fprintf ff "ν(%a)_%d%a.(%a)" (aprint ", " vprint)
                       names n tprint t (aprint ", " print) ms
     | VVar v    -> vprint ff v
@@ -384,7 +349,7 @@ module Make(Act:Act)(Prop:Prop) = struct
       | CExi (m) -> cAll (fn m)
       | Next (m) -> next (fn m)
       | Atom b -> atom (Prop.neg b)
-      | VVar m -> box_of_var m
+      | VVar m -> box_var m
       | IVar _ -> assert false
     in
     unbox (fn m)
@@ -405,41 +370,6 @@ module Make(Act:Act)(Prop:Prop) = struct
   let until f g = mu0 (fun x -> disj2 (conj2 f (next x)) g)
   let before f g = nu0 (fun x -> disj2 (conj2 f (next x)) g) (* CHECK ? *)
 
-  (** decorate: replace infinite time in mu with fresh variables *)
-  let decorate =
-    (** tries a little sharing ...
-        It seems to give a significative gain in some cases.  One
-        should do this more systematically, in particular for mu with
-        bound variables (bounded higher in the formula *)
-    let adone = ref [] in
-    let rec fn m =
-      try let (_, r) = List.find (fun (m',_) -> ileq m m' = 0) !adone in r
-      with Not_found ->
-        let res =
-          match m with
-          | Mu(t,n,b) ->
-             let t = if t = Inf then pred m t else t in
-             mu ~time:t n (mbinder_arity b)
-                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
-          | Nu(t,n,b) ->
-             nu ~time:t n (mbinder_arity b)
-                (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
-          | Conj l -> conj (List.map fn l)
-          | Disj l -> disj (List.map fn l)
-          | MAll (a,m) -> mAll a (fn m)
-          | MExi (a,m) -> mExi a (fn m)
-          | CAll (m) -> cAll (fn m)
-          | CExi (m) -> cExi (fn m)
-          | Next (m) -> next (fn m)
-          | Atom b -> atom b
-          | VVar m -> box_of_var m
-          | IVar _ -> assert false
-        in
-        adone := (m,res)::!adone;
-        res
-    in
-    fun m -> unbox (fn m)
-
   (** Comparison of formulas, means in some sence subtyping
       or trivial implication *)
   let leq m1 m2 =
@@ -448,12 +378,12 @@ module Make(Act:Act)(Prop:Prop) = struct
       match m1, m2 with
       | Nu(t1,i1,f1), Nu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
          cmp_time t2 t1 <= Zero &&
-           let (v,m) = unmbind vvar f1 in
-           LibTools.array_for_all2 fn m (msubst f2 (Array.map free_of v))
+           let (v,m) = unmbind f1 in
+           LibTools.array_for_all2 fn m (msubst f2 (Array.map vvar v))
       | Mu(t1,i1,f1), Mu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
          cmp_time t1 t2 <= Zero &&
-           let (v,m) = unmbind vvar f1 in
-           LibTools.array_for_all2 fn m (msubst f2 (Array.map free_of v))
+           let (v,m) = unmbind f1 in
+           LibTools.array_for_all2 fn m (msubst f2 (Array.map vvar v))
       | Disj(l1), Disj(l2)
       | Conj(l1), Conj(l2) when List.length l1 = List.length l2 ->
          List.for_all2 fn l1 l2
@@ -565,12 +495,12 @@ module Make(Act:Act)(Prop:Prop) = struct
       | Nu(t1,i1,f1) ->
          if t1 != Inf && not (List.exists (fun t -> compare_time t1 t = 0) !res)
          then res := t1 :: !res;
-         let (v,m) = unmbind vvar f1 in
+         let (v,m) = unmbind f1 in
          Array.iter fn m
       | Mu(t1,i1,f1) ->
          if t1 != Inf && not (List.exists (fun t -> compare_time t1 t = 0) !res)
          then res := t1 :: !res;
-         let (v,m) = unmbind vvar f1 in
+         let (v,m) = unmbind f1 in
          Array.iter fn m
       | Disj(l1)
       | Conj(l1) ->
@@ -594,10 +524,10 @@ module Make(Act:Act)(Prop:Prop) = struct
     let rec fn m = match m with
       | Nu(t1,i1,f1) ->
          t1 = Inf &&
-           let (v,m) = unmbind vvar f1 in
+           let (v,m) = unmbind f1 in
            Array.for_all fn m
       | Mu(t1,i1,f1) ->
-         let (v,m) = unmbind vvar f1 in
+         let (v,m) = unmbind f1 in
          Array.for_all fn m
       | Disj(l1)
       | Conj(l1) ->
@@ -648,13 +578,13 @@ module Make(Act:Act)(Prop:Prop) = struct
       | Nu(t1,i1,f1), Nu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
          if t1 != Inf && not (List.exists (fun t -> compare_time t1 t = 0) !memo)
          then (res := t2 :: !res; memo := t1 :: !memo);
-         let (v,m) = unmbind vvar f1 in
-         LibTools.array_for_all2 fn m (msubst f2 (Array.map free_of v))
+         let (v,m) = unmbind f1 in
+         LibTools.array_for_all2 fn m (msubst f2 (Array.map vvar v))
       | Mu(t1,i1,f1), Mu(t2,i2,f2) when i1 = i2 && mbinder_arity f1 = mbinder_arity f2 ->
          if t1 != Inf && not (List.exists (fun t -> compare_time t1 t = 0) !memo)
          then (res := t2 :: !res; memo := t1 :: !memo);
-         let (v,m) = unmbind vvar f1 in
-         LibTools.array_for_all2 fn m (msubst f2 (Array.map free_of v))
+         let (v,m) = unmbind f1 in
+         LibTools.array_for_all2 fn m (msubst f2 (Array.map vvar v))
       | Disj(l1), Disj(l2)
       | Conj(l1), Conj(l2) when List.length l1 = List.length l2 ->
          List.for_all2 fn l1 l2

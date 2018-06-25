@@ -105,11 +105,10 @@ let bfix cst names body index =
   if index < 0 || index >= Array.length names then Earley.give_up ();
   (fun env ->
     box_apply (cst index)
-              (mbind vvar names
-                      (fun xs ->
-                        let env = ref env in
-                        Array.iter2 (fun name v ->
-                            env := (name,v)::!env) names xs;
+      (let vs = new_mvar vvar names in
+       let env = ref env in
+       bind_mvar vs (Array.iter2 (fun name v ->
+                            env := (name,v)::!env) names (Array.map box_var vs);
                         box_array (Array.map (fun f -> f !env) body))))
 
 let bmu = bfix (fun index x -> Mu(Inf,index,x))
@@ -157,7 +156,7 @@ let parser form prio =
   | f:(form PDisj)  "=>" g:(form PImpl)      when prio = PImpl -> cs2 imply' f g
   | f:(form PImpl) "<=>" g:(form PImpl)      when prio = PEqui -> cs2 equiv f g
 
-and body =
+and parser body =
   | f:(form top) -> [f]
   | '(' l:(form top) ls:{ _:',' (form top)}* ')' -> l::ls
 
