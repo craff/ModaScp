@@ -2,6 +2,7 @@ open Bindlib
 open Print
 open Sct
 open Timed
+open Order
 
 let chr_scp = Chrono.create "scp"
 let chr_search = Chrono.create "search"
@@ -9,7 +10,7 @@ let chr_add = Chrono.create "add"
 let chr_solve = Chrono.create "solve"
 let chr_simp = Chrono.create "simplify"
 
-(** Signature for that actions *)
+(** Signature for actions, just constants *)
 module type Act = sig
   type t
   val compare : t -> t -> int
@@ -18,9 +19,10 @@ end
 
 (** Signature for the predicate usually giving properties of states *)
 module type Prop = sig
-  type t
-  val imply : t -> t -> bool
-  val neg : t -> t
+  type t (* atomic proposition *)
+  val imply : t -> t -> bool (* imply a b, returns true if a implies b is known to be true
+                                may return false when we do not know *)
+  val neg : t -> t           (* negation *)
   val compare : t -> t -> int
   val to_string : t -> string
 end
@@ -30,11 +32,13 @@ module Make(Act:Act)(Prop:Prop) = struct
 
   (** type of time, that can index mus and nus *)
   type time =
-    | Inf              (** inifinite ordinal *)
-    | Var of (int * int)
+    | Inf                (** infinite ordinal, i.e. large enough for
+                            all fixpoint to converge *)
+    | Var of (int * int) (** Var(n,p) means fresh variable number n minus p.
+                             See below for the exact meaning. *)
 
   (** Formula of the modal mu calculus + Next from LTL,
-      Next means and transition, inclusing invisible ones *)
+      Next means invisible transition between possibly tagged transition *)
   and modal =
     (** Logical connectives *)
     | Atom of Prop.t        (** atomic formulas, denotes a set of states *)
@@ -52,16 +56,15 @@ module Make(Act:Act)(Prop:Prop) = struct
                                 some labelled transition *)
     (** LTL modality *)
     | Next of modal         (** Next(m) holds iff m holds in the next states,
-                                which we may reach by a labelled transition or
-                                an invisible one *)
+                                before a labelled transition  *)
     (** fixpoints *)
     | Mu   of time * int * (modal, modal array) mbinder (** Least fixpoint *)
     | Nu   of time * int * (modal, modal array) mbinder (** Greatest fixpoint *)
 
-    | VVar of modal var
-    | IVar of int * int
+    | VVar of modal var     (** variables *)
+    | IVar of int * int     (** only for formula traversal *)
 
-  (* Time printing *)
+  (** Time printing *)
   let tprint ff = function
     | Inf -> ()
     | Var(t,f) -> Format.fprintf ff "?"  (* FIXME *)
@@ -72,13 +75,10 @@ module Make(Act:Act)(Prop:Prop) = struct
   (** total order on time *)
   let rec compare_time t1 t2 =
     match (t1,t2) with
-    | Var _, Inf -> -1
-    | Inf, Var _ -> 1
-    | Inf, Inf -> 0
-    | Var(m1,f1), Var(m2,f2) ->
-       match compare m1 m2 with
-       | 0 -> f1 - f2
-       | c -> c
+    | Var _     , Inf        -> -1
+    | Inf       , Var _      ->  1
+    | Inf       , Inf        ->  0
+    | Var(m1,f1), Var(m2,f2) -> lex2 compare m1 m2 (-) f1 f2
 
   (** A total order on formulas, This order indirectly select the next
       litteral in the solver procedure, so changing it is not at all
@@ -86,82 +86,58 @@ module Make(Act:Act)(Prop:Prop) = struct
   and ileq m1 m2 =
     if m1 == m2 then 0 else
       match m1, m2 with
-      | Atom(a1), Atom(a2) -> Prop.compare a1 a2
-      | Atom _, _ -> -1
-      | _, Atom _ -> 1
-      | Disj(l1), Disj(l2)
-      | Conj(l1), Conj(l2) ->
-         let rec gn ms1 ms2 =
-           match ms1,ms2 with
-           | [], [] -> 0
-           | [], _  -> 1
-           | _, []  -> -1
-           | m1::ms1, m2::ms2 ->
-              begin
-                match ileq m1 m2 with
-                | 0 -> gn ms1 ms2
-                | c -> c
-              end
-         in
-         gn l1 l2
-      | Disj _, _ -> -1
-      | _, Disj _ -> 1
-      | Conj _, _ -> -1
-      | _, Conj _ -> 1
+      | Atom(a1)    , Atom(a2)     -> Prop.compare a1 a2
+      | Atom _      , _            -> -1
+      | _           , Atom _       ->  1
+      | Disj(l1)    , Disj(l2)
+      | Conj(l1)    , Conj(l2)     ->  lexl ileq l1 l2
+      | Disj _      , _            -> -1
+      | _           , Disj _       ->  1
+      | Conj _      , _            -> -1
+      | _           , Conj _       ->  1
       | Nu(t1,i1,f1), Nu(t2,i2,f2)
       | Mu(t1,i1,f1), Mu(t2,i2,f2) ->
-         begin
-           match compare i1 i2 with
-           | 0 ->
-              begin
-                match compare (mbinder_arity f1) (mbinder_arity f2) with
-                | 0 ->
-                   let (v,m) = unmbind f1 in
-                   begin
-                     match ileq m.(i1) (msubst f2 (Array.map vvar v)).(i2) with
-                     | 0 -> compare_time t1 t2
-                     | c -> c
-                   end
-                | c -> c
-              end
-           | c -> c
-         end
-      | Nu _, _ -> -1
-      | _, Nu _ -> 1
-      | Mu _, _ -> -1
-      | _, Mu _ -> 1
-      | Next(m1), Next(m2) -> ileq m1 m2
-      | Next _, _ -> -1
-      | _, Next _ -> 1
-      | CAll(m1), CAll(m2)
-      | CExi(m1), CExi(m2) -> ileq m1 m2
-      | CAll _, _ -> -1
-      | _, CAll _ -> 1
-      | CExi _, _ -> -1
-      | _, CExi _ -> 1
-      | MAll(a1,m1), MAll(a2,m2)
-      | MExi(a1,m1), MExi(a2,m2) ->
-         begin
-           match Act.compare a1 a2 with
-           | 0 -> ileq m1 m2
-           | c -> c
-         end
-      | MAll _, _ -> -1
-      | _, MAll _ -> 1
-      | MExi _, _ -> -1
-      | _, MExi _ -> 1
-      | VVar(v1), VVar(v2) -> compare_vars v1 v2
-      (*| VVar _, _ -> -1
-      | _, VVar _ -> 1*)
-      | IVar _, _
-      | _, IVar _ -> assert false
+         let fn f1 f2 =
+           let (v,m) = unmbind f1 in
+           ileq m.(i1) (msubst f2 (Array.map vvar v)).(i2)
+         in
+         lex4 compare i1 i2
+           compare (mbinder_arity f1) (mbinder_arity f2)
+           fn f1 f2
+           compare_time t1 t2
+      | Nu _        , _            -> -1
+      | _           , Nu _         ->  1
+      | Mu _        , _            -> -1
+      | _, Mu _                    ->  1
+      | Next(m1)    , Next(m2)     -> ileq m1 m2
+      | Next _      , _            -> -1
+      | _           , Next _       ->  1
+      | CAll(m1)    , CAll(m2)
+      | CExi(m1)    , CExi(m2)     -> ileq m1 m2
+      | CAll _      , _            -> -1
+      | _           , CAll _       ->  1
+      | CExi _      , _            -> -1
+      | _           , CExi _       ->  1
+      | MAll(a1,m1) , MAll(a2,m2)
+      | MExi(a1,m1) , MExi(a2,m2)  -> lex2 Act.compare a1 a2 ileq m1 m2
+      | MAll _      , _            -> -1
+      | _           , MAll _       ->  1
+      | MExi _      , _            -> -1
+      | _           , MExi _       ->  1
+      | VVar(v1)    , VVar(v2)     -> compare_vars v1 v2
+    (*| VVar _      , _            -> -1
+      | _           , VVar _       -> 1*)
+      | IVar _      , _
+      | _           , IVar _       -> assert false
 
+  (** Map for formulas *)
   module Mod = struct
     type t = modal
     let compare = ileq
   end
   module MMap = Map.Make(Mod)
 
+  (** index building for formulas used in Var(index,_) *)
   let index =
     let map = ref MMap.empty in
     let c = ref 0 in
@@ -175,74 +151,61 @@ module Make(Act:Act)(Prop:Prop) = struct
         n)
 
   (** Smart constructors *)
-  let atom a = box (Atom a)
+  let atom a  = box (Atom a)
+  let _Always = Conj []
+  let always  = box _Always
+  let _Never  = Disj []
+  let never   = box _Never
 
   (** Sorting and simplifiying disjunction *)
   let rec _Disj l =
     let rec fn acc m = match acc, m with
-      | _, Conj [] -> raise Exit (* True in a disjunction *)
-      | _, Disj l' -> List.fold_left fn acc l'
-      | (Next m1::acc), Next m2 -> Next(_Disj [m1;m2])::acc
-      | (CExi m1::acc), CExi m2 -> CExi(_Disj [m1;m2])::acc
-      | (MExi(a1, m1)::acc), MExi(a2,m2) when Act.compare a1 a2 = 0 ->
-         MExi(a1, (_Disj [m1;m2]))::acc
-      | _, m -> m::acc
+      | _                  , Conj []  -> raise Exit (* True in a disjunction *)
+      | _                  , Disj l'  -> List.fold_left fn acc l'
+      | (Next m1::acc)     , Next m2  -> Next(_Disj [m1;m2])::acc
+      | (CExi m1::acc)     , CExi m2  -> CExi(_Disj [m1;m2])::acc
+      | (MExi(a1, m1)::acc), MExi(a2,m2)
+           when Act.compare a1 a2 = 0 -> MExi(a1, (_Disj [m1;m2]))::acc
+      | _                  , m -> m::acc
     in
     try
       let l = List.fold_left fn [] l in
       let l = List.sort_uniq ileq l in
-      match l with
-      | [m] -> m
-      | _ -> Disj l
-    with Exit ->
-      Conj []
+      match l with [m] -> m | _ -> Disj l
+    with Exit -> _Always
 
   (** Sorting and simplifiying conjunction *)
   let rec _Conj l =
     let rec fn acc m = match acc, m with
-      | _, Disj [] -> raise Exit (* False in a conjonction *)
-      | _, Conj l' -> List.fold_left fn acc l'
-      | (Next m1::acc), Next m2 -> Next(_Disj [m1;m2])::acc
-      | (CAll m1::acc), CAll m2 -> CAll(_Disj [m1;m2])::acc
-      | (MAll(a1, m1)::acc), MAll(a2,m2) when Act.compare a1 a2 = 0 ->
-         MAll(a1, (_Disj [m1;m2]))::acc
-      | _, m -> m::acc
+      | _                  , Disj []  -> raise Exit (* False in a conjonction *)
+      | _                  , Conj l'  -> List.fold_left fn acc l'
+      | (Next m1::acc)     , Next m2  -> Next(_Disj [m1;m2])::acc
+      | (CAll m1::acc)     , CAll m2  -> CAll(_Disj [m1;m2])::acc
+      | (MAll(a1, m1)::acc), MAll(a2,m2)
+           when Act.compare a1 a2 = 0 -> MAll(a1, (_Disj [m1;m2]))::acc
+      | _                  , m        -> m::acc
     in
     try
       let l = List.fold_left fn [] l in
       let l = List.sort_uniq ileq l in
-      match l with
-      | [m] -> m
-      | _ -> Conj l
-    with Exit ->
-      Disj []
+      match l with [m] -> m | _ -> Conj l
+    with Exit -> _Never
 
   let conj l = box_apply (fun x -> _Conj x) (box_list l)
   let disj l = box_apply (fun x -> _Disj x) (box_list l)
 
-  let always = conj []
-  let never  = disj []
-
   let mAll a m = box_apply (fun x -> MAll(a,x)) m
   let mExi a m = box_apply (fun x -> MExi(a,x)) m
-  let cAll m = box_apply (fun x -> CAll(x)) m
-  let cExi m = box_apply (fun x -> CExi(x)) m
-  let next m = box_apply (fun x -> Next(x)) m
+  let cAll m   = box_apply (fun x -> CAll(x)) m
+  let cExi m   = box_apply (fun x -> CExi(x)) m
+  let next m   = box_apply (fun x -> Next(x)) m
 
-  (** mu and nu smart constructors given in two variants, with
-      function [mu] and [nu] taking an array of [modal box] and [mu']
-      and [nu'] an array of [modal var] *)
+  (** mu and nu smart constructors taking an array of [modal box] *)
   let mu ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
     box_apply (fun x -> Mu(time,idx,x))
         (let vs = new_mvar vvar names in
          bind_mvar vs (box_array (fn (Array.map box_var vs))))
-
-  let mu' ?(time=Inf) idx s fn =
-    let names = Array.init s (fun i -> "M" ^ string_of_int i) in
-    box_apply (fun x -> Mu(time,idx,x))
-              (let vs = new_mvar vvar names in
-               bind_mvar vs (box_array (fn (Array.map box_var vs))))
 
   let nu ?(time=Inf) idx s fn =
     let names = Array.init s (fun i -> "M" ^ string_of_int i) in
@@ -250,26 +213,21 @@ module Make(Act:Act)(Prop:Prop) = struct
               (let vs = new_mvar vvar names in
                bind_mvar vs (box_array (fn (Array.map box_var vs))))
 
-  let nu' ?(time=Inf) idx s fn =
-    let names = Array.init s (fun i -> "M" ^ string_of_int i) in
-    box_apply (fun x -> Nu(time,idx,x))
-              (let vs = new_mvar vvar names in
-               bind_mvar vs (box_array (fn (Array.map box_var vs))))
   (** unary mu and nu *)
-  let mu0 ?(time=Inf) fn =
+  let mu1 ?(time=Inf) fn =
     mu ~time 0 1 (fun x -> [| fn x.(0) |])
 
-  let nu0 ?(time=Inf) fn =
+  let nu1 ?(time=Inf) fn =
     nu ~time 0 1 (fun x -> [| fn x.(0) |])
 
   (** lifting function *)
   let lift : modal -> modal box = fun m ->
     let rec fn = function
       | Mu(t,n,b) ->
-         mu' ~time:t n (mbinder_arity b)
+         mu ~time:t n (mbinder_arity b)
             (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
       | Nu(t,n,b) ->
-         nu' ~time:t n (mbinder_arity b)
+         nu ~time:t n (mbinder_arity b)
             (fun xs -> Array.map fn (msubst b (Array.map unbox xs)))
       | Conj l -> conj (List.map fn l)
       | Disj l -> disj (List.map fn l)
@@ -365,10 +323,10 @@ module Make(Act:Act)(Prop:Prop) = struct
   let conj2 m1 m2 = conj [m1; m2]
   let equiv m1 m2 = conj2 (imply' m1 m2) (imply' m2 m1)
 
-  let globally m = nu0 (fun x -> conj2 m (next x))
-  let eventually m = mu0 (fun x -> disj2 m (next x))
-  let until f g = mu0 (fun x -> disj2 (conj2 f (next x)) g)
-  let before f g = nu0 (fun x -> disj2 (conj2 f (next x)) g) (* CHECK ? *)
+  let globally m = nu1 (fun x -> conj2 m (next x))
+  let eventually m = mu1 (fun x -> disj2 m (next x))
+  let until f g = mu1 (fun x -> disj2 (conj2 f (next x)) g)
+  let before f g = nu1 (fun x -> disj2 (conj2 f (next x)) g) (* CHECK ? *)
 
   (** Comparison of formulas, means in some sence subtyping
       or trivial implication *)

@@ -100,7 +100,7 @@ let rec disjs ?(cond=(fun _ -> true)) n f =
   in
   disj (fn [] n)
 
-let psi n = nu0 (fun x ->
+let psi n = nu1 (fun x ->
   conj [next x;
         disjs n (fun i ->
                 conj [atom (true,i);
@@ -114,15 +114,15 @@ let phi n0 =
     if n = 0 then
       conjs n0 (fun i -> imply' (atom (true, i)) (next (List.nth l (i-1))))
     else
-      let q = if even n then nu0 else mu0 in
+      let q = if even n then nu1 else mu1 in
       q (fun x ->  a (x::l) (n - 1))
   and b =
     disj [disjs ~cond:even n0 (fun i ->
-           conj [nu0 (fun x -> conj [next x; mu0 (fun y -> disj [atom (true, i); next y])]);
+           conj [nu1 (fun x -> conj [next x; mu1 (fun y -> disj [atom (true, i); next y])]);
                  conjs ~cond:(fun j -> odd j && j > i) n0 (fun j ->
-                         mu0 (fun x -> disj [next x; nu0 (fun y -> conj [atom (false, j); next y])]))]);
+                         mu1 (fun x -> disj [next x; nu1 (fun y -> conj [atom (false, j); next y])]))]);
           conjs ~cond:(fun j -> odd j) n0 (fun j ->
-                         mu0 (fun x -> disj [next x; nu0 (fun y -> conj [atom (false, j); next y])]))]
+                         mu1 (fun x -> disj [next x; nu1 (fun y -> conj [atom (false, j); next y])]))]
   in
   unbox (imply' (psi n0) (equiv (a [] n0) b))
 
@@ -131,15 +131,15 @@ let sphi n0 =
     if n = 0 then
       conjs n0 (fun i -> imply' (atom (true, i)) (next (List.nth l (i-1))))
     else
-      let q = if even n then nu0 else mu0 in
+      let q = if even n then nu1 else mu1 in
       q (fun x ->  a (x::l) (n - 1))
   and b =
     disj [disjs ~cond:even n0 (fun i ->
-           conj [nu0 (fun x -> conj [next x; mu0 (fun y -> disj [atom (true, i); next y])]);
+           conj [nu1 (fun x -> conj [next x; mu1 (fun y -> disj [atom (true, i); next y])]);
                  conjs ~cond:(fun j -> odd j && j > i) n0 (fun j ->
-                         mu0 (fun x -> disj [next x; nu0 (fun y -> conj [atom (false, j); next y])]))]);
+                         mu1 (fun x -> disj [next x; nu1 (fun y -> conj [atom (false, j); next y])]))]);
           conjs ~cond:(fun j -> odd j) n0 (fun j ->
-                         mu0 (fun x -> disj [next x; nu0 (fun y -> conj [atom (false, j); next y])]))]
+                         mu1 (fun x -> disj [next x; nu1 (fun y -> conj [atom (false, j); next y])]))]
   in
   unbox (equiv (a [] n0) b)
 
@@ -148,15 +148,15 @@ let bad_phi n0 =
     if n = 0 then
       conjs n0 (fun i -> imply' (atom (true, i)) (next (List.nth l (i-1))))
     else
-      let q = if even n then nu0 else mu0 in
+      let q = if even n then nu1 else mu1 in
       q (fun x ->  a (x::l) (n - 1))
   and b =
     disj [disjs ~cond:even n0 (fun i ->
-           conj [nu0 (fun x -> conj [next x; mu0 (fun y -> disj [atom (true, i); next y])]);
+           conj [nu1 (fun x -> conj [next x; mu1 (fun y -> disj [atom (true, i); next y])]);
                  conjs ~cond:(fun j -> even j && j > i) n0 (fun j ->
-                         mu0 (fun x -> disj [next x; nu0 (fun y -> conj [atom (false, j); next y])]))]);
+                         mu1 (fun x -> disj [next x; nu1 (fun y -> conj [atom (false, j); next y])]))]);
           conjs ~cond:(fun j -> even j) n0 (fun j ->
-                         mu0 (fun x -> disj [next x; nu0 (fun y -> conj [atom (false, j); next y])]))]
+                         mu1 (fun x -> disj [next x; nu1 (fun y -> conj [atom (false, j); next y])]))]
   in
   unbox (imply' (psi n0) (equiv (a [] n0) b))
 
@@ -193,7 +193,7 @@ let munus ls0 =
        let l = List.rev l in
       conjs n0 (fun i -> imply' (atom (true, i)) (next (List.nth l (fst (List.nth ls1 (i-1)) - 1))))
     | (_,b)::ls ->
-      let q = if b then mu0 else nu0 in
+      let q = if b then mu1 else nu1 in
       q (fun x ->  a (x::l) ls)
   in
   unbox (a [] ls0)
